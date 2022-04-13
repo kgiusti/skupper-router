@@ -1702,27 +1702,35 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
     qdr_connection_t      *conn = safe_deref_qdr_connection_t(action->args.connection.conn);
     qdr_link_t            *link = safe_deref_qdr_link_t(action->args.connection.link);
     qdr_delivery_t *initial_dlv = action->args.connection.initial_delivery;
+    qdr_terminus_t      *source = action->args.connection.source;
+    qdr_terminus_t      *target = action->args.connection.target;
+    qd_direction_t          dir = action->args.connection.dir;
+
+    if (link) {
+        // The core is responsible for freeing the link even if this action occurs
+        // during shutdown (discard == True).  The reason is that this action is
+        // run as a result of an I/O thread calling qdr_link_first_attach() which
+        // returns a pointer to this link. Freeing link here leaves the I/O
+        // thread with a dangling pointer. By adding the link to the
+        // core->open_links list it will be cleaned up on core shutdown. The I/O
+        // thread that originally called qdr_link_first_attach() MUST call
+        // qdr_link_detach() or qdr_link_close() in any case in order to safely
+        // drop its pointer to this link.
+        link->attach_count = 1;
+        DEQ_INSERT_TAIL(core->open_links, link);
+        if (conn) {
+            qdr_add_link_ref(&conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
+        }
+    }
+
     if (discard || !conn || !link) {
         if (initial_dlv)
             qdr_delivery_decref(core, initial_dlv,
                                 "qdr_link_inbound_first_attach_CT - discarding action");
+        qdr_terminus_free(source);
+        qdr_terminus_free(target);
         return;
     }
-
-    qd_direction_t  dir    = action->args.connection.dir;
-    qdr_terminus_t *source = action->args.connection.source;
-    qdr_terminus_t *target = action->args.connection.target;
-
-    //
-    // Start the attach count.
-    //
-    link->attach_count = 1;
-
-    //
-    // Put the link into the proper lists for tracking.
-    //
-    DEQ_INSERT_TAIL(core->open_links, link);
-    qdr_add_link_ref(&conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
 
     //
     // Mark the link as an edge link if it's inside an edge connection.
