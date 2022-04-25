@@ -404,7 +404,7 @@ typedef struct {
     size_t deliveries_redirected_to_fallback;
 }  qdr_global_stats_t;
 ALLOC_DECLARE(qdr_global_stats_t);
-typedef void (*qdr_global_stats_handler_t) (void *context);
+typedef void (*qdr_global_stats_handler_t) (void *context, bool discard);
 void qdr_request_global_stats(qdr_core_t *core, qdr_global_stats_t *stats, qdr_global_stats_handler_t callback, void *context);
 
 

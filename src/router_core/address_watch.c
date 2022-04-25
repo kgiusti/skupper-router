@@ -31,7 +31,7 @@ struct qdr_address_watch_t {
 ALLOC_DECLARE(qdr_address_watch_t);
 ALLOC_DEFINE(qdr_address_watch_t);
 
-static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work);
+static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard);
 static void qdr_core_watch_address_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_core_unwatch_address_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_address_watch_free_CT(qdr_address_watch_t *watch);
@@ -114,10 +114,11 @@ static void qdr_address_watch_free_CT(qdr_address_watch_t *watch)
 }
 
 
-static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work)
+static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard)
 {
-    work->watch_handler(work->context,
-                        work->local_consumers, work->in_proc_consumers, work->remote_consumers, work->local_producers);
+    if (!discard)
+        work->watch_handler(work->context,
+                            work->local_consumers, work->in_proc_consumers, work->remote_consumers, work->local_producers);
 }
 
 

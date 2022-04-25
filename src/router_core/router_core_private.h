@@ -220,7 +220,7 @@ DEQ_DECLARE(qdr_delivery_cleanup_t, qdr_delivery_cleanup_list_t);
 // actions occur in-order and are not run concurrently.
 //
 typedef struct qdr_general_work_t qdr_general_work_t;
-typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t *work);
+typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t *work, bool discard);
 
 struct qdr_general_work_t {
     DEQ_LINKS(qdr_general_work_t);

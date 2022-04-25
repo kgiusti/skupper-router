@@ -44,7 +44,6 @@ ALLOC_DEFINE(qdr_subscription_ref_t);
 const uint64_t QD_DELIVERY_MOVED_TO_NEW_LINK = 999999999;
 
 static void qdr_general_handler(void *context);
-
 static void qdr_core_setup_init(qdr_core_t *core)
 {
     //
@@ -808,20 +807,24 @@ void qdr_del_subscription_ref_CT(qdr_subscription_ref_list_t *list, qdr_subscrip
 }
 
 
+// Runs on the Proactor timer thread.
+//
 static void qdr_general_handler(void *context)
 {
     qdr_core_t              *core = (qdr_core_t*) context;
     qdr_general_work_list_t  work_list;
     qdr_general_work_t      *work;
+    bool                     discard;
 
     sys_mutex_lock(core->work_lock);
     DEQ_MOVE(core->work_list, work_list);
+    discard = core->running == false;
     sys_mutex_unlock(core->work_lock);
 
     work = DEQ_HEAD(work_list);
     while (work) {
         DEQ_REMOVE_HEAD(work_list);
-        work->handler(core, work);
+        work->handler(core, work, discard);
         free_qdr_general_work_t(work);
         work = DEQ_HEAD(work_list);
     }
@@ -875,13 +878,16 @@ void qdr_connection_work_free_CT(qdr_connection_work_t *work)
     free_qdr_connection_work_t(work);
 }
 
-static void qdr_post_global_stats_response(qdr_core_t *core, qdr_general_work_t *work)
+static void qdr_post_global_stats_response(qdr_core_t *core, qdr_general_work_t *work, bool discard)
 {
-    work->stats_handler(work->context);
+    work->stats_handler(work->context, discard);
 }
 
 static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
+    // Note: ignore discard == True here. Let the general work queue pass
+    // discard to the request handler so it can properly clean up later.
+
     qdr_global_stats_t *stats = action->args.stats_request.stats;
     if (stats) {
         stats->addrs = DEQ_SIZE(core->addrs);
