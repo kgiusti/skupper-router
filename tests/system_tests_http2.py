@@ -25,6 +25,7 @@ from subprocess import PIPE
 from time import sleep
 
 import system_test
+from http1_tests import wait_http_listeners_up
 from system_test import TestCase, Qdrouterd, QdManager, Process, retry_assertion
 from system_test import curl_available, TIMEOUT, skip_test_in_ci
 
@@ -129,7 +130,7 @@ class Http2TestBase(TestCase):
             print("CURL ERROR (%s): %s %s" % (status, out, err), flush=True)
 
         if assert_status:
-            assert status == 0
+            assert status == 0, f"Expected curl exit status==0, but got {status}"
 
         if get_err:
             return out, err
@@ -283,12 +284,19 @@ class CommonHttp2Tests:
 
         # Add back the listener and run a curl command to make sure that the newly added listener is
         # back up and running.
-        create_result = qd_manager.create("io.skupper.router.httpListener", self.http_listener_props)
-        sleep(2)
+        create_result = qd_manager.create("io.skupper.router.httpListener",
+                                          self.http_listener_props)
+        wait_http_listeners_up(server_addr)
         out = self.run_curl(client_addr, args=self.get_all_curl_args())
         self.assertIn(ret_string, out)
 
-    def check_connector_delete(self, client_addr, server_addr):
+    def check_connector_delete(self, client_addr, server_addr,
+                               listener_addr=None):
+        # listener_addr: management address of router with httpListener
+        # configured. Must be supplied if httpListener is on a different router
+        # than the httpConnector
+        listener_addr = listener_addr or server_addr
+
         # Run curl 127.0.0.1:port --http2-prior-knowledge
         # We are first making sure that the http request goes thru successfully.
         out = self.run_curl(client_addr, args=self.get_all_curl_args())
@@ -353,6 +361,9 @@ class CommonHttp2Tests:
                 conn_present = True
         self.assertTrue(conn_present)
 
+        # wait for the httpListener to become available again
+        wait_http_listeners_up(listener_addr)
+
         out = self.run_curl(client_addr, args=self.get_all_curl_args())
         ret_string = ""
         i = 0
@@ -392,6 +403,7 @@ class Http2TestOneStandaloneRouter(Http2TestBase, CommonHttp2Tests):
             ('httpConnector', cls.connector_props)
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
@@ -487,6 +499,7 @@ class Http2TestOneEdgeRouter(Http2TestBase, CommonHttp2Tests):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
         cls.router_qdra.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
@@ -525,6 +538,7 @@ class Http2TestOneInteriorRouter(Http2TestBase, CommonHttp2Tests):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
         cls.router_qdra.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
@@ -589,6 +603,7 @@ class Http2TestTwoRouter(Http2TestBase, CommonHttp2Tests):
         cls.router_qdra.wait_router_connected('QDR.B')
         cls.router_qdrb.wait_router_connected('QDR.A')
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_000_stats(self):
@@ -644,7 +659,8 @@ class Http2TestTwoRouter(Http2TestBase, CommonHttp2Tests):
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
         self.check_connector_delete(client_addr=self.router_qdra.http_addresses[0],
-                                    server_addr=self.router_qdrb.addresses[0])
+                                    server_addr=self.router_qdrb.addresses[0],
+                                    listener_addr=self.router_qdra.addresses[0])
 
 
 class Http2TestEdgeInteriorRouter(Http2TestBase, CommonHttp2Tests):
@@ -687,6 +703,7 @@ class Http2TestEdgeInteriorRouter(Http2TestBase, CommonHttp2Tests):
         cls.router_qdra = cls.tester.qdrouterd("edge-router", config_edgea)
         cls.router_qdrb.is_edge_routers_connected(num_edges=1)
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
 
 class Http2TestInteriorEdgeRouter(Http2TestBase, CommonHttp2Tests):
@@ -730,6 +747,7 @@ class Http2TestInteriorEdgeRouter(Http2TestBase, CommonHttp2Tests):
         cls.router_qdrb = cls.tester.qdrouterd("edge-router", config_edge)
         cls.router_qdra.is_edge_routers_connected(num_edges=1)
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
 
 class Http2TestDoubleEdgeInteriorRouter(Http2TestBase):
@@ -803,6 +821,7 @@ class Http2TestDoubleEdgeInteriorRouter(Http2TestBase):
         cls.router_qdrb = cls.tester.qdrouterd("edge-router-b", config_edgeb, wait=True)
         cls.router_qdrc.is_edge_routers_connected(num_edges=2)
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdrc.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_check_connector_delete(self):
@@ -916,6 +935,7 @@ class Http2TestEdgeToEdgeViaInteriorRouter(Http2TestBase, CommonHttp2Tests):
         cls.router_qdrb = cls.tester.qdrouterd("edge-router-b", config_edge_b)
         cls.interior_qdr.is_edge_routers_connected(num_edges=2)
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_test(), "Python 3.7 or greater, Quart 0.13.0 or greater and curl needed to run http2 tests")
     def test_zzz_http_connector_delete(self):
@@ -953,6 +973,7 @@ class Http2TestGoAway(Http2TestBase):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
         cls.router_qdra.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_h2_test(),
                      "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
@@ -996,6 +1017,7 @@ class Http2Q2OneRouterTest(Http2TestBase):
         ])
         cls.router_qdra = cls.tester.qdrouterd(name, config, wait=True)
         cls.router_qdra.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_h2_test(),
                      "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
@@ -1068,6 +1090,7 @@ class Http2Q2TwoRouterTest(Http2TestBase):
         cls.router_qdra.wait_router_connected('QDR.B')
         cls.router_qdrb.wait_router_connected('QDR.A')
         cls.router_qdrb.wait_http_server_connected()
+        wait_http_listeners_up(cls.router_qdra.addresses[0])
 
     @unittest.skipIf(skip_h2_test(),
                      "Python 3.7 or greater, hyper-h2 and curl needed to run hyperhttp2 tests")
