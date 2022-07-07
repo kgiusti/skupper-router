@@ -124,10 +124,7 @@ class Http2TestTlsTwoRouter(Http2TestTwoRouter, RouterTestSslBase):
         cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
                                                   listen_port=os.getenv('SERVER_LISTEN_PORT'),
                                                   wait=False,
-                                                  server_file="http2_server.py",
-                                                  stdin=PIPE,
-                                                  stdout=PIPE,
-                                                  stderr=PIPE)
+                                                  server_file="http2_server.py")
         inter_router_port = cls.tester.get_port()
         cls.listener_name = 'listenerToBeDeleted'
         cls.http_listener_props = {'port': cls.tester.get_port(),
@@ -260,9 +257,6 @@ class Http2TlsQ2TwoRouterTest(RouterTestPlainSaslCommon, Http2TestBase, RouterTe
                                                   listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
                                                   wait=False,
                                                   server_file="http2_slow_q2_server.py",
-                                                  stdin=PIPE,
-                                                  stdout=PIPE,
-                                                  stderr=PIPE,
                                                   env=env)
 
         config_qdra = Qdrouterd.Config([
@@ -418,9 +412,6 @@ class Http2TwoRouterTlsOverSASLExternal(RouterTestPlainSaslCommon,
                                                   listen_port=os.getenv('SERVER_LISTEN_PORT'),
                                                   wait=False,
                                                   server_file="http2_server.py",
-                                                  stdin=PIPE,
-                                                  stdout=PIPE,
-                                                  stderr=PIPE,
                                                   env=env)
         config_qdra = Qdrouterd.Config([
             ('listener', {'host': '0.0.0.0', 'role': 'normal', 'port': cls.tester.get_port(),
