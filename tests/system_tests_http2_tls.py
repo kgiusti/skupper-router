@@ -515,7 +515,8 @@ class Http2TlsAuthenticatePeerOneRouter(Http2TestBase, RouterTestSslBase):
         os.environ['SERVER_LISTEN_PORT'] = str(cls.tester.get_port())
         cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
                                                   listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
-                                                  server_file="http2_server.py")
+                                                  # server_file="http2_server.py")
+                                                  server_file="http2_slow_q2_server.py")
         name = "http2-tls-auth-peer-router"
         cls.connector_name = 'connectorToBeDeleted'
         cls.connector_props = {
