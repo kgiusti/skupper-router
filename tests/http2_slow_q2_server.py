@@ -61,6 +61,7 @@ def handle_events(conn, events):
 
 
 def handle(sock):
+    print("Socket %s Connection accepted!" % sock.fileno(), flush=True)
     config = h2.config.H2Configuration(client_side=False)
 
     # The default initial window per HTTP2 spec is 64K.
@@ -78,6 +79,7 @@ def handle(sock):
             pass
         if not data:
             break
+        print("sock %s: %s bytes read" % (sock.fileno(), len(data)), flush=True)
         try:
             events = conn.receive_data(data)
         except Exception as e:
@@ -86,7 +88,9 @@ def handle(sock):
         handle_events(conn, events)
         data_to_send = conn.data_to_send()
         if data_to_send:
+            print("sock %s: sending %s bytes..." % (sock.fileno(), len(data_to_send)), flush=True)
             sock.sendall(data_to_send)
+    sock.close()
 
 
 def main():
@@ -118,10 +122,12 @@ def main():
 
     else:
         # Clear non-TLS socket.
+        print("INitialize clear socket, port=%s" % port, flush=True)
         sock = socket.socket()
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(('0.0.0.0', int(port)))
         sock.listen(5)
+        print("Accepting connections", flush=True)
 
         while True:
             # The accept method blocks until someone attempts to connect to our TCP

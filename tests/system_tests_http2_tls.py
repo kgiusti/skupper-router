@@ -512,6 +512,7 @@ class Http2TlsAuthenticatePeerOneRouter(Http2TestBase, RouterTestSslBase):
             return
         cls.http2_server_name = "http2_server"
         os.environ["QUART_APP"] = "http2server:app"
+        os.environ["SERVER_TLS"] = "no"
         os.environ['SERVER_LISTEN_PORT'] = str(cls.tester.get_port())
         cls.http2_server = cls.tester.http2server(name=cls.http2_server_name,
                                                   listen_port=int(os.getenv('SERVER_LISTEN_PORT')),
