@@ -990,5 +990,165 @@ class Http1AdaptorQ2Standalone(TestCase):
         self.check_logs("server", router.logfile_path)
 
 
+class Http2AdaptorIssue627Test(TestCase):
+    """
+    Test connector delete via managment during server connection loss
+    """
+    CONNECTOR_TYPE = 'io.skupper.router.httpConnector'
+    PROTOCOL_VERSION = "HTTP2"
+
+    @classmethod
+    def setUpClass(cls):
+        super(Http2AdaptorIssue627Test, cls).setUpClass()
+
+        cls.test_name = 'HTTPAdaptorIssue627'
+
+        config = Qdrouterd.Config([('router', {'mode': 'interior',
+                                               'id': 'INTA'}),
+                                   ('listener', {'role': 'normal',
+                                                 'port': cls.tester.get_port()}),
+                                   ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+                                   ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+                                   ])
+        cls.INTA = cls.tester.qdrouterd('INTA', config, wait=True)
+
+    def start_server(self, connector_port):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.settimeout(TIMEOUT)
+        server.bind(("", connector_port))
+        server.listen(1)
+        return server
+
+    def test_01_issue_627(self):
+        """Reproduce Issue #627"""
+        mgmt = self.INTA.management
+
+        for i in range(3000):
+            connector_name = f"Connector_{self.test_name}_{i}"
+            van_address = f"closest/{self.test_name}/{i}"
+            connector_port = self.tester.get_port()
+
+
+            cmd = ["test-receiver",
+                   "-a", self.INTA.addresses[0],
+                   "-c", "0"]
+            rx = self.popen(cmd, expect=-15)
+
+            cmd = ["test-sender",
+                   "-a", self.INTA.addresses[0],
+                   "-c", "0"]
+            tx = self.popen(cmd, expect=-15)
+
+            with self.start_server(connector_port) as server:
+                attributes = {'address': van_address,
+                              'host': '127.0.0.1',
+                              'port': connector_port,
+                              'protocolVersion': self.PROTOCOL_VERSION}
+                mgmt.create(type=self.CONNECTOR_TYPE,
+                            name=connector_name,
+                            attributes=attributes)
+                # server_conn, _ = server.accept()
+
+                self.INTA.wait_address(van_address, subscribers=1)
+
+                # server_conn.shutdown(socket.SHUT_RDWR)
+                # server_conn.close()
+
+            mgmt.delete(type=self.CONNECTOR_TYPE, name=connector_name)
+
+            self.INTA.wait_address_unsubscribed(van_address, timeout=15.0)
+
+            tx.terminate()
+            tx.wait()
+            tx.teardown()
+            rx.terminate()
+            rx.wait()
+            rx.teardown()
+
+            results = mgmt.query(type='io.skupper.router.connection').results
+            print(f"Test cycle {i} complete {len(results)}!", flush=True)
+
+
+
+
+class TcpAdaptorIssue627Test(TestCase):
+    """
+    Test connector delete via managment during server connection loss
+    """
+    CONNECTOR_TYPE = 'io.skupper.router.tcpConnector'
+
+    @classmethod
+    def setUpClass(cls):
+        super(TcpAdaptorIssue627Test, cls).setUpClass()
+
+        cls.test_name = 'TcpAdaptorIssue627'
+
+        config = Qdrouterd.Config([('router', {'mode': 'interior',
+                                               'id': 'INTA'}),
+                                   ('listener', {'role': 'normal',
+                                                 'port': cls.tester.get_port()}),
+                                   ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+                                   ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+                                   ])
+        cls.INTA = cls.tester.qdrouterd('INTA', config, wait=True)
+
+    def start_server(self, connector_port):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.settimeout(TIMEOUT)
+        server.bind(("", connector_port))
+        server.listen(1)
+        return server
+
+    def test_01_issue_627(self):
+        """Reproduce Issue #627"""
+        mgmt = self.INTA.management
+
+        for i in range(3000):
+            connector_name = f"Connector_{self.test_name}_{i}"
+            van_address = f"closest/{self.test_name}/{i}"
+            connector_port = self.tester.get_port()
+
+
+            cmd = ["test-receiver",
+                   "-a", self.INTA.addresses[0],
+                   "-c", "0"]
+            rx = self.popen(cmd, expect=-15)
+
+            cmd = ["test-sender",
+                   "-a", self.INTA.addresses[0],
+                   "-c", "0"]
+            tx = self.popen(cmd, expect=-15)
+
+            with self.start_server(connector_port) as server:
+                attributes = {'address': van_address,
+                              'host': '127.0.0.1',
+                              'port': connector_port}
+                mgmt.create(type=self.CONNECTOR_TYPE,
+                            name=connector_name,
+                            attributes=attributes)
+                # server_conn, _ = server.accept()
+
+                self.INTA.wait_address(van_address, subscribers=1)
+
+                # server_conn.shutdown(socket.SHUT_RDWR)
+                # server_conn.close()
+
+            mgmt.delete(type=self.CONNECTOR_TYPE, name=connector_name)
+
+            self.INTA.wait_address_unsubscribed(van_address, timeout=15.0)
+
+            tx.terminate()
+            tx.wait()
+            tx.teardown()
+            rx.terminate()
+            rx.wait()
+            rx.teardown()
+
+            results = mgmt.query(type='io.skupper.router.connection').results
+            print(f"Test cycle {i} complete {len(results)}!", flush=True)
+
+
 if __name__ == '__main__':
     unittest.main(main_module())
