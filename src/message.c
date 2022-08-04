@@ -365,6 +365,23 @@ char* qd_message_repr(qd_message_t *msg, char* buffer, size_t len, qd_log_bits f
     return buffer;
 }
 
+static inline uint32_t _buffer_inc_fanout_LH(qd_buffer_t *buf)
+{
+    return buf->bfanout++;
+}
+
+static inline uint32_t _buffer_dec_fanout_LH(qd_buffer_t *buf)
+{
+    assert(buf->bfanout > 0);
+    return buf->bfanout--;
+}
+
+static inline void _buffer_set_fanout_LH(qd_buffer_t *buf, uint32_t value)
+{
+    buf->bfanout = value;
+}
+
+
 
 /**
  * Return true if there is at least one consumable octet in the buffer chain
@@ -792,7 +809,7 @@ static qd_section_status_t message_section_check_LH(qd_message_content_t *conten
         }
 
         while (start) {
-            qd_buffer_inc_fanout(start);
+            _buffer_inc_fanout_LH(start);
             buffers_protected = true;
             if (start == last)
                 break;
@@ -1092,7 +1109,7 @@ void qd_message_free(qd_message_t *in_msg)
         qd_buffer_t *buf = msg->cursor.buffer;
         while (buf) {
             qd_buffer_t *next_buf = DEQ_NEXT(buf);
-            if (qd_buffer_dec_fanout(buf) == 1) {
+            if (_buffer_dec_fanout_LH(buf) == 1) {
                 DEQ_REMOVE(content->buffers, buf);
                 qd_buffer_free(buf);
             }
@@ -1296,7 +1313,7 @@ void qd_message_add_fanout(qd_message_t *out_msg)
     //
     msg->cursor.buffer = buf;
     while (buf) {
-        qd_buffer_inc_fanout(buf);
+        _buffer_inc_fanout_LH(buf);
         buf = DEQ_NEXT(buf);
     }
 
@@ -1549,7 +1566,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
                 if (content->pending) {
                     if (qd_buffer_size(content->pending) > 0) {
                         // pending buffer has bytes that are part of message
-                        qd_buffer_set_fanout(content->pending, content->fanout);
+                        _buffer_set_fanout_LH(content->pending, content->fanout);
                         DEQ_INSERT_TAIL(content->buffers,
                                         content->pending);
                     } else {
@@ -1588,7 +1605,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
             if (qd_buffer_capacity(content->pending) == 0) {
                 // Pending buffer is full
                 LOCK(&content->lock);
-                qd_buffer_set_fanout(content->pending, content->fanout);
+                _buffer_set_fanout_LH(content->pending, content->fanout);
                 DEQ_INSERT_TAIL(content->buffers, content->pending);
                 content->pending = 0;
                 if (_Q2_holdoff_should_block_LH(content)) {
@@ -1645,7 +1662,7 @@ qd_message_t *qd_message_receive(pn_delivery_t *delivery)
             // push what we do have for testing/processing
             if (qd_buffer_size(content->pending) > 0) {
                 LOCK(&content->lock);
-                qd_buffer_set_fanout(content->pending, content->fanout);
+                _buffer_set_fanout_LH(content->pending, content->fanout);
                 DEQ_INSERT_TAIL(content->buffers, content->pending);
                 content->pending = 0;
                 UNLOCK(&content->lock);
@@ -1847,7 +1864,7 @@ void qd_message_send(qd_message_t *in_msg,
                     //
                     // this buffer may be freed if there are no more references to it
                     //
-                    uint32_t ref_count = (msg->is_fanout) ? qd_buffer_dec_fanout(buf) : 1;
+                    uint32_t ref_count = (msg->is_fanout) ? _buffer_dec_fanout_LH(buf) : 1;
                     if (ref_count == 1) {
 
                         DEQ_REMOVE(content->buffers, buf);
@@ -2385,7 +2402,7 @@ int qd_message_extend(qd_message_t *msg, qd_composed_field_t *field, bool *q2_bl
 
     LOCK(&content->lock);
     while (buf) {
-        qd_buffer_set_fanout(buf, content->fanout);
+        _buffer_set_fanout_LH(buf, content->fanout);
         buf = DEQ_NEXT(buf);
     }
 
@@ -2639,7 +2656,7 @@ void qd_message_stream_data_release(qd_message_stream_data_t *stream_data)
     //
     while (start_buf != stop_buf) {
         qd_buffer_t *next = DEQ_NEXT(start_buf);
-        uint32_t refcnt = (fanout) ? qd_buffer_dec_fanout(start_buf) : 1;
+        uint32_t refcnt = (fanout) ? _buffer_dec_fanout_LH(start_buf) : 1;
         assert(refcnt > 0);
         if (refcnt == 1) {
             DEQ_REMOVE(content->buffers, start_buf);

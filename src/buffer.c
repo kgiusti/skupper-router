@@ -49,8 +49,8 @@ qd_buffer_t *qd_buffer(void)
     qd_buffer_t *buf = new_qd_buffer_t();
 
     DEQ_ITEM_INIT(buf);
-    buf->size   = 0;
-    sys_atomic_init(&buf->bfanout, 0);
+    buf->size    = 0;
+    buf->bfanout = 0;
     return buf;
 }
 
@@ -58,7 +58,6 @@ qd_buffer_t *qd_buffer(void)
 void qd_buffer_free(qd_buffer_t *buf)
 {
     if (!buf) return;
-    sys_atomic_destroy(&buf->bfanout);
     free_qd_buffer_t(buf);
 }
 

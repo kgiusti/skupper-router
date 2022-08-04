@@ -1837,7 +1837,7 @@ static char *test_check_stream_data_partial(void *context)
     qd_buffer_list_t blist = DEQ_EMPTY;
     qd_buffer_list_append(&blist, section, 3);
     for (qd_buffer_t *bf = DEQ_HEAD(blist); bf; bf = DEQ_NEXT(bf))
-        qd_buffer_set_fanout(bf, content->fanout);
+        bf->bfanout = content->fanout;
     DEQ_APPEND(content->buffers, blist);
 
     qd_message_stream_data_t *sdata = 0;
@@ -1857,7 +1857,7 @@ static char *test_check_stream_data_partial(void *context)
     // append the remainder to complete this section
     qd_buffer_list_append(&blist, body, 7);
     for (qd_buffer_t *bf = DEQ_HEAD(blist); bf; bf = DEQ_NEXT(bf))
-        qd_buffer_set_fanout(bf, content->fanout);
+        bf->bfanout = content->fanout;
     DEQ_APPEND(content->buffers, blist);
 
     // add another complete body data section

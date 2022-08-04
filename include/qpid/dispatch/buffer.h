@@ -36,11 +36,20 @@ DEQ_DECLARE(qd_buffer_t, qd_buffer_list_t);
 #define QD_BUFFER_DEFAULT_SIZE 512
 extern size_t BUFFER_SIZE;
 
-/** A raw byte buffer .*/
+/** A raw byte buffer
+ * Memory for the payload is appended to this structure when the qd_buffer_t is allocated. Payload data can be accessed
+ * starting at the first octet past this structure.
+ *
+ * The bfanout (buffer fanout) field is set to the number of outgoing links this buffer will be sent out. For unicast
+ * messages this will be 1, but for multicast and local subscribers it may be > 1. Each time this buffer is completely
+ * sent out a link the bfanout count is decremented and the buffer can be freed once bfanout becomes zero. Note well
+ * that since multiple links may be processed concurrently on different I/O threads the bfanout count MUST be protected
+ * by the message content lock. See message.c for details.
+ */
 struct qd_buffer_t {
     DEQ_LINKS(qd_buffer_t);
     unsigned int size;     ///< Size of data content
-    sys_atomic_t bfanout;  ///< The number of receivers for this buffer
+    uint32_t     bfanout;
 };
 
 /**
@@ -132,42 +141,6 @@ void qd_buffer_list_free_buffers(qd_buffer_list_t *list);
  * @return total number of bytes of data in the buffer list
  */
 unsigned int qd_buffer_list_length(const qd_buffer_list_t *list);
-
-/**
- * Set the fanout value on the buffer.
- * @return the _old_ count before updating
- */
-static inline uint32_t qd_buffer_set_fanout(qd_buffer_t *buf, uint32_t value)
-{
-    return sys_atomic_set(&buf->bfanout, value);
-}
-
-/**
- * Get the fanout value on the buffer.
- * @return the count
- */
-static inline uint32_t qd_buffer_get_fanout(const qd_buffer_t *buf)
-{
-    return buf->bfanout;
-}
-
-/**
- * Increase the fanout by 1. How many receivers should this buffer be sent to.
- * @return the _old_ count (pre increment)
- */
-static inline uint32_t qd_buffer_inc_fanout(qd_buffer_t *buf)
-{
-    return sys_atomic_inc(&buf->bfanout);
-}
-
-/**
- * Decrease the fanout by one
- * @return the _old_ count (pre decrement)
- */
-static inline uint32_t qd_buffer_dec_fanout(qd_buffer_t *buf)
-{
-    return sys_atomic_dec(&buf->bfanout);
-}
 
 /**
  * Advance the buffer by len. Does not manipulate the contents of the buffer
