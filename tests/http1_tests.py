@@ -31,7 +31,7 @@ from typing import List, Any, Tuple, Mapping, Optional
 from skupper_router.management.client import Node
 from system_test import TestCase, TIMEOUT, Logger, Qdrouterd, unittest
 from system_test import curl_available, run_curl, retry
-from system_test import retry_exception
+from system_test import retry_exception, Process
 
 
 CURL_VERSION = (7, 47, 0)   # minimum required
@@ -1850,3 +1850,109 @@ class HttpAdaptorListenerConnectTestBase(TestCase):
         self.assertRaises(ConnectionRefusedError, retry, _func)
 
         l_mgmt.delete(type=self.LISTENER_TYPE, name=listener_name)
+
+
+class HttpTlsBadConfigTestsBase(TestCase):
+    """
+    Negative test for invalid HTTP connector and listener configurations
+    """
+
+    # TestCase subclasses must provide the correct value for PROTOCOL_VERSION
+    PROTOCOL_VERSION = None
+
+    @classmethod
+    def setUpClass(cls):
+        super(HttpTlsBadConfigTestsBase, cls).setUpClass()
+        config = [
+            ('router', {'mode': 'interior',
+                        'id': 'BadConfigRouter'}),
+            ('listener', {'role': 'normal',
+                          'port': cls.tester.get_port()}),
+            ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+            ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+        ]
+
+        cls.router = cls.tester.qdrouterd('BadConfigRouter',
+                                          Qdrouterd.Config(config), wait=True)
+
+    def _test_connector_mgmt_missing_ssl_profile(self):
+        """Attempt to create a connector with a bad sslProfile"""
+        assert self.PROTOCOL_VERSION is not None
+        port = self.tester.get_port()
+        mgmt = self.router.qd_manager
+        self.assertRaises(Exception, mgmt.create, "httpConnector",
+                          {'address': 'foo',
+                           'host': '127.0.0.1',
+                           'port': port,
+                           'protocolVersion': self.PROTOCOL_VERSION,
+                           'sslProfile': "NotFound"})
+        self.assertEqual(1, mgmt.returncode, "Unexpected returncode from skmanage")
+        self.assertIn("Invalid httpConnector configuration", mgmt.stdout)
+
+    def _test_connector_config_missing_ssl_profile(self):
+        """Test missing sslProfile configuration"""
+        assert self.PROTOCOL_VERSION is not None
+        connector_port = self.tester.get_port()
+        config = [
+            ('router', {'mode': 'interior',
+                        'id': 'BadHttpConnector'}),
+            ('listener', {'role': 'normal',
+                          'port': self.tester.get_port()}),
+            ('httpConnector', {'address': 'foo',
+                               'host': '127.0.0.1',
+                               'port': connector_port,
+                               'protocolVersion': self.PROTOCOL_VERSION,
+                               'sslProfile': "DoesNotExist"}),
+            ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+            ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+        ]
+
+        # expect router to exit with error
+
+        router = self.tester.qdrouterd('BadHttpConnector',
+                                       Qdrouterd.Config(config), wait=False,
+                                       expect=Process.EXIT_FAIL)
+        msg = f"Adaptor connector httpConnector/127.0.0.1:{connector_port} configuration error: failed to find sslProfile 'DoesNotExist'"
+        router.wait_log_message(msg)
+        router.wait(timeout=TIMEOUT)
+
+    def _test_listener_mgmt_missing_ssl_profile(self):
+        """Attempt to create a listener with a bad sslProfile"""
+        assert self.PROTOCOL_VERSION is not None
+        port = self.tester.get_port()
+        mgmt = self.router.qd_manager
+        self.assertRaises(Exception, mgmt.create, "httpListener",
+                          {'address': 'foo',
+                           'host': '0.0.0.0',
+                           'port': port,
+                           'protocolVersion': self.PROTOCOL_VERSION,
+                           'sslProfile': "NotFound"})
+        self.assertEqual(1, mgmt.returncode, "Unexpected returncode from skmanage")
+        self.assertIn("Invalid httpListener configuration", mgmt.stdout)
+
+    def _test_listener_config_missing_ssl_profile(self):
+        """Test missing sslProfile configuration"""
+        assert self.PROTOCOL_VERSION is not None
+        listener_port = self.tester.get_port()
+        config = [
+            ('router', {'mode': 'interior',
+                        'id': 'BadHttpListener'}),
+            ('listener', {'role': 'normal',
+                          'port': self.tester.get_port()}),
+            ('httpListener', {'address': 'foo',
+                              'host': '0.0.0.0',
+                              'port': listener_port,
+                              'protocolVersion': self.PROTOCOL_VERSION,
+                              'sslProfile': "DoesNotExist"}),
+            ('address', {'prefix': 'closest',   'distribution': 'closest'}),
+            ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+        ]
+
+        # expect router to exit with error
+
+        router = self.tester.qdrouterd('BadHttpListener',
+                                       Qdrouterd.Config(config), wait=False,
+                                       expect=Process.EXIT_FAIL)
+        msg = f"Adaptor listener httpListener/0.0.0.0:{listener_port} configuration error: failed to find sslProfile 'DoesNotExist'"
+        router.wait_log_message(msg)
+        router.wait(timeout=TIMEOUT)
