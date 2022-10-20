@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include "adaptors/adaptor_tls.h"
 #include "http1_private.h"
 
 #include <proton/proactor.h>
@@ -158,6 +159,7 @@ static qdr_http1_connection_t *_create_server_connection(qd_http_connector_t *ct
     hconn->handler_context.handler = &_handle_connection_events;
     hconn->handler_context.context = hconn;
     sys_atomic_init(&hconn->q2_restart, 0);
+    hconn->require_tls       = !!ctor->tls_domain;
     hconn->cfg.host = qd_strdup(config->adaptor_config->host);
     hconn->cfg.port = qd_strdup(config->adaptor_config->port);
     hconn->cfg.address = qd_strdup(config->adaptor_config->address);
@@ -220,13 +222,16 @@ static qdr_http1_connection_t *_create_server_connection(qd_http_connector_t *ct
 // I/O and timer threads.
 qd_http_connector_t *qd_http1_configure_connector(qd_dispatch_t *qd, qd_http_adaptor_config_t *config, qd_entity_t *entity)
 {
-    qd_http_connector_t *c = qd_http_connector(qd->server);
-    if (!c) {
-        qd_log(qdr_http1_adaptor->log, QD_LOG_ERROR, "Unable to create http connector: no memory");
-        return 0;
+    qd_http_connector_t *c = qd_http_connector(qd->server, config);
+    if (c->config->adaptor_config->ssl_profile_name) {
+        c->tls_domain = qd_tls_domain(c->config->adaptor_config, qd, qdr_http1_adaptor->log, http1_alpn_protocols,
+                                      HTTP1_NUM_ALPN_PROTOCOLS, false);
+        if (!c->tls_domain) {
+            // note qd_tls_domain logged the error
+            qd_http_connector_decref(c);
+            return 0;
+        }
     }
-    c->config = config;
-    DEQ_ITEM_INIT(c);
 
     qdr_http1_connection_t *hconn = _create_server_connection(c, qd, config);
     if (hconn) {

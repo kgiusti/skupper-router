@@ -42,6 +42,7 @@ typedef struct qd_tcp_connector_t qd_tcp_connector_t;
 typedef struct qdr_tcp_stats_t qdr_tcp_stats_t;
 typedef struct qd_tcp_adaptor_config_t qd_tcp_adaptor_config_t;
 typedef struct qd_adaptor_listener_t qd_adaptor_listener_t;
+typedef struct qd_tls_domain_t         qd_tls_domain_t;
 
 struct qd_tcp_adaptor_config_t {
     qd_adaptor_config_t *adaptor_config; // Pointer to the common adaptor config used by all adaptors.
@@ -70,6 +71,7 @@ struct qd_tcp_listener_t
     vflow_record_t           *vflow;
     qdr_tcp_stats_t          *tcp_stats;
     qd_adaptor_listener_t    *adaptor_listener;
+    qd_tls_domain_t          *tls_domain;
 
     // must hold tcp_adaptor->listener_lock during list operations:
     DEQ_LINKS(qd_tcp_listener_t);
@@ -87,6 +89,7 @@ struct qd_tcp_connector_t
     void                     *dispatcher_conn;
     vflow_record_t           *vflow;
     qdr_tcp_stats_t          *tcp_stats;
+    qd_tls_domain_t          *tls_domain;
     DEQ_LINKS(qd_tcp_connector_t);
 };
 
@@ -101,8 +104,6 @@ void qdra_tcp_connection_get_CT(qdr_core_t          *core,
                                 qdr_query_t         *query,
                                 const char          *qdr_tcp_connection_columns[]);
 
-void qd_free_tcp_adaptor_config(qd_tcp_adaptor_config_t *config, qd_log_source_t  *log_source);
-qd_error_t qd_load_tcp_adaptor_config(qd_dispatch_t *qd, qd_tcp_adaptor_config_t *config, qd_entity_t* entity);
 #define QDR_TCP_CONNECTION_COLUMN_COUNT 10
 extern const char *qdr_tcp_connection_columns[QDR_TCP_CONNECTION_COLUMN_COUNT + 1];
 

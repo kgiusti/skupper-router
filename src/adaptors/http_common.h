@@ -38,6 +38,7 @@ typedef enum {
 } qd_http_version_t;
 
 typedef struct qd_http_adaptor_config_t qd_http_adaptor_config_t;
+typedef struct qd_tls_domain_t          qd_tls_domain_t;
 
 //
 // Common adaptor config for http1 and http2
@@ -61,6 +62,7 @@ struct qd_http_listener_t {
     qd_server_t               *server;
     vflow_record_t            *vflow;
     qd_adaptor_listener_t     *adaptor_listener;
+    qd_tls_domain_t           *tls_domain;
     DEQ_LINKS(qd_http_listener_t);
 };
 DEQ_DECLARE(qd_http_listener_t, qd_http_listener_list_t);
@@ -77,11 +79,12 @@ struct qd_http_connector_t {
     long                          delay;
     void                         *ctx;
     vflow_record_t               *vflow;
+    qd_tls_domain_t              *tls_domain;
     DEQ_LINKS(qd_http_connector_t);
 };
 DEQ_DECLARE(qd_http_connector_t, qd_http_connector_list_t);
 
-qd_http_connector_t *qd_http_connector(qd_server_t *server);
+qd_http_connector_t *qd_http_connector(qd_server_t *server, qd_http_adaptor_config_t *config);
 void qd_http_connector_decref(qd_http_connector_t* c);
 
 //
@@ -112,10 +115,6 @@ void qd_http_record_request(qdr_core_t *core, const char * method, uint32_t stat
                             const char *local_site, const char *remote_site, bool ingress,
                             uint64_t bytes_in, uint64_t bytes_out, uint64_t latency);
 char *qd_get_host_from_host_port(const char *host_port);
-
-qd_http_adaptor_config_t *qd_load_http_adaptor_config(qd_dispatch_t *qd, qd_entity_t *entity,
-                                                      qd_log_source_t *log_source);
-void                      qd_free_http_adaptor_config(qd_http_adaptor_config_t *config);
 
 //
 // These functions are defined in their respective HTTP adaptors:
