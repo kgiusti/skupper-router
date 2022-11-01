@@ -1480,6 +1480,9 @@ class QdManager:
             cmd += " %s=%s" % (k, v)
         return json.loads(self(cmd))
 
+    def read(self, name):
+        return json.loads(self(f"READ --name {name}"))
+
     def update(self, long_type, kwargs, name=None, identity=None):
         cmd = 'UPDATE --type=%s' % long_type
         if identity is not None:
