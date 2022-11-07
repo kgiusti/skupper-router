@@ -41,6 +41,7 @@
 typedef struct qdr_http1_out_data_t      qdr_http1_out_data_t;
 typedef struct qdr_http1_request_base_t  qdr_http1_request_base_t;
 typedef struct qdr_http1_connection_t    qdr_http1_connection_t;
+typedef struct qd_tls_t                  qd_tls_t;
 
 DEQ_DECLARE(qdr_http1_connection_t, qdr_http1_connection_list_t);
 
@@ -113,6 +114,7 @@ struct qdr_http1_connection_t {
     pn_raw_connection_t   *raw_conn;
     qdr_connection_t      *qdr_conn;
     qdr_http1_adaptor_t   *adaptor;
+    qd_tls_t              *tls;  // TLS session (if configured)
 
     uint64_t               conn_id;
     qd_handler_context_t   handler_context;
@@ -135,7 +137,7 @@ struct qdr_http1_connection_t {
     //
     struct {
         char    *client_ip_addr;
-        char    *reply_to_addr;  // set once link is up
+        char    *reply_to_addr;  // set after link is up
         uint64_t next_msg_id;
     } client;
 
@@ -165,7 +167,8 @@ struct qdr_http1_connection_t {
     //
     qdr_http1_request_list_t requests;
 
-    // statistics
+    // statistics: unencrypted octet counters. The TLS instance maintains counters for the corresponding encrypted
+    // octets.
     //
     uint64_t out_http1_octets;
     uint64_t in_http1_octets;

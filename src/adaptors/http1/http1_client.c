@@ -138,8 +138,11 @@ static void _generate_response_msg(_client_request_t *hreq, int code, const char
 static qdr_http1_connection_t *_create_client_connection(qd_http_listener_t *li)
 {
     qdr_http1_connection_t *hconn = new_qdr_http1_connection_t();
+    assert(hconn);
 
     ZERO(hconn);
+    hconn->conn_id                 = qd_server_allocate_connection_id(li->server);
+    hconn->require_tls             = !!li->tls_domain;
     hconn->type = HTTP1_CONN_CLIENT;
     hconn->admin_status = QD_CONN_ADMIN_ENABLED;
     hconn->oper_status = QD_CONN_OPER_DOWN;
@@ -148,8 +151,8 @@ static qdr_http1_connection_t *_create_client_connection(qd_http_listener_t *li)
     hconn->handler_context.handler = &_handle_connection_events;
     hconn->handler_context.context = hconn;
     sys_atomic_init(&hconn->q2_restart, 0);
+
     hconn->client.next_msg_id = 1;
-    hconn->require_tls        = !!li->tls_domain;
 
     // configure the HTTP/1.x library
 
@@ -186,17 +189,40 @@ static qdr_http1_connection_t *_create_client_connection(qd_http_listener_t *li)
     return hconn;
 }
 
+static void _on_tls_connection_secured(qd_tls_t *tls, void *context)
+{
+    qdr_http1_connection_t *hconn = (qdr_http1_connection_t *) context;
+    assert(hconn && hconn->tls);
+    qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE, "[C%" PRIu64 "] TLS handshake succeeded: connection secure",
+           hconn->conn_id);
+    if (hconn->qdr_conn && hconn->qdr_conn->connection_info) {
+        qd_tls_update_connection_info(hconn->tls, hconn->qdr_conn->connection_info);
+    }
+}
+
 // Handle the proactor listener accept event. This runs on the proactor listener thread.
 //
 static void _handle_listener_accept(qd_adaptor_listener_t *adaptor_listener, pn_listener_t *pn_listener, void *context)
 {
     qd_http_listener_t     *li    = (qd_http_listener_t *) context;
     qdr_http1_connection_t *hconn = _create_client_connection(li);
-    if (hconn) {
-        // Note: the proactor may schedule the hconn on another thread
-        // during this call!
-        pn_listener_raw_accept(pn_listener, hconn->raw_conn);
+    assert(hconn);
+
+    // hack: proton forces us to accept the connection in order to allow further connection request to arrive. This is a
+    // problem if an error occurs during the configuration of the qdr_http1_connection_t. So we unconditionally accept
+    // the connection, then check for error in the PN_RAW_CONNECTION_CONNECTED event handler.
+
+    if (hconn->require_tls) {
+        // set up a TLS session for this connection
+        hconn->tls = qd_tls(li->tls_domain, hconn, hconn->conn_id, _on_tls_connection_secured);
+        if (!hconn->tls) {
+            // see PN_RAW_CONNECTION_CONNECTED handling. Note that qd_tls() will log the error for us.
+        }
     }
+
+    // Note: the proactor may schedule the hconn on another thread
+    // during this call!
+    pn_listener_raw_accept(pn_listener, hconn->raw_conn);
 }
 
 // Management Agent API - Create
@@ -285,7 +311,6 @@ static void _setup_client_connection(qdr_http1_connection_t *hconn)
                                                       "",                  // peer router version,
                                                       false);              // streaming links
 
-    hconn->conn_id = qd_server_allocate_connection_id(hconn->qd_server);
     hconn->qdr_conn = qdr_connection_opened(qdr_http1_adaptor->core,
                                             qdr_http1_adaptor->adaptor,
                                             true,  // incoming
@@ -360,12 +385,12 @@ static void _replenish_empty_read_buffers(qdr_http1_connection_t *hconn)
 
     if (!hconn->q2_blocked && (hconn->client.reply_to_addr || hconn->cfg.event_channel)) {
         int granted = qd_raw_connection_grant_read_buffers(hconn->raw_conn);
-        qd_log(qdr_http1_adaptor->log, QD_LOG_DEBUG, "[C%"PRIu64"] %d read buffers granted",
-               hconn->conn_id, granted);
+        qd_log(qdr_http1_adaptor->log, QD_LOG_DEBUG,
+               "[C%" PRIu64 "] %d empty read buffers granted to the raw connection", hconn->conn_id, granted);
     }
 }
 
-uint64_t _get_output_data(void *context, qd_adaptor_buffer_list_t *abufs, size_t limit)
+static uint64_t _take_output_data(void *context, qd_adaptor_buffer_list_t *abufs, size_t limit)
 {
     uint64_t                total_octets = 0;
     qdr_http1_connection_t *hconn        = (qdr_http1_connection_t *) context;
@@ -401,28 +426,76 @@ uint64_t _get_output_data(void *context, qd_adaptor_buffer_list_t *abufs, size_t
 static int _do_raw_io(qdr_http1_connection_t *hconn)
 {
     int error = 0;
-    if (hconn->raw_conn) {
-        bool work = false;
-        do {
-            size_t                   octets    = 0;
-            qd_adaptor_buffer_list_t abuf_list = DEQ_EMPTY;
-            work = qdr_http1_do_raw_io(hconn->raw_conn, _get_output_data, hconn, &abuf_list, &octets);
-            if (DEQ_SIZE(abuf_list)) {
-                qd_buffer_list_t qbuf_list = DEQ_EMPTY;
-                qd_adaptor_buffers_copy_to_qd_buffers(&abuf_list, &qbuf_list);
+    bool work  = false;
+    do {
+        size_t                   octets    = 0;
+        qd_adaptor_buffer_list_t abuf_list = DEQ_EMPTY;
+        work = qdr_http1_do_raw_io(hconn->raw_conn, _take_output_data, hconn, &abuf_list, &octets);
+        if (DEQ_SIZE(abuf_list)) {
+            qd_buffer_list_t qbuf_list = DEQ_EMPTY;
+            qd_adaptor_buffers_copy_to_qd_buffers(&abuf_list, &qbuf_list);
 
-                qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE,
-                       "[C%" PRIu64 "] pushing %zu received octets into codec (%zu buffers)", hconn->conn_id, octets,
-                       DEQ_SIZE(qbuf_list));
+            qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE,
+                   "[C%" PRIu64 "] pushing %zu received octets into codec (%zu buffers)", hconn->conn_id, octets,
+                   DEQ_SIZE(qbuf_list));
 
-                error = h1_codec_connection_rx_data(hconn->http_conn, &qbuf_list, octets);
-                if (error) {
-                    qdr_http1_close_connection(hconn, "Incoming response message failed to parse");
-                }
+            error = h1_codec_connection_rx_data(hconn->http_conn, &qbuf_list, octets);
+            if (error) {
+                qdr_http1_close_connection(hconn, "Incoming response message failed to parse");
             }
-        } while (work && !error);
-    }
+        }
+    } while (work && !error);
 
+    return error;
+}
+
+// Encrypted I/O work loop
+static int _do_tls_io(qdr_http1_connection_t *hconn)
+{
+    int                      error    = 0;
+    bool                     rx_data  = false;
+    qd_adaptor_buffer_list_t in_abufs = DEQ_EMPTY;
+
+    assert(hconn->raw_conn);
+
+    do {
+        uint64_t octets = 0;
+        rx_data         = false;
+
+        error = qd_tls_do_io(hconn->tls, hconn->raw_conn, _take_output_data, (void *) hconn, &in_abufs, &octets);
+        if (error) {
+            qd_adaptor_buffer_list_free_buffers(&in_abufs);
+            qdr_http1_close_connection(hconn, "TLS connection I/O failed");
+        } else if (!DEQ_IS_EMPTY(in_abufs)) {
+            qd_buffer_list_t qbuf_list = DEQ_EMPTY;
+
+            rx_data = true;
+            qd_adaptor_buffers_copy_to_qd_buffers(&in_abufs, &qbuf_list);
+
+            qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE,
+                   "[C%" PRIu64 "] pushing %zu received octets into codec (%zu buffers)", hconn->conn_id, octets,
+                   DEQ_SIZE(qbuf_list));
+
+            error = h1_codec_connection_rx_data(hconn->http_conn, &qbuf_list, octets);
+            if (error) {
+                qdr_http1_close_connection(hconn, "Incoming response message failed to parse");
+            }
+        }
+    } while (rx_data && !error);
+
+    return error;
+}
+
+inline static int _do_io(qdr_http1_connection_t *hconn)
+{
+    int error = 0;
+    if (hconn->raw_conn) {
+        if (hconn->tls) {
+            error = _do_tls_io(hconn);
+        } else {
+            error = _do_raw_io(hconn);
+        }
+    }
     return error;
 }
 
@@ -439,18 +512,22 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
            pn_event_type_name(pn_event_type(e)));
 
     switch (pn_event_type(e)) {
+        case PN_RAW_CONNECTION_CONNECTED: {
+            if (hconn->require_tls && !hconn->tls) {
+                // TLS setup failed in the listener accept handler - close it now:
+                qdr_http1_close_connection(hconn, "TLS connection initialization failed");
+            } else {
+                char *conn_addr = qd_raw_conn_get_address(hconn->raw_conn);
+                if (conn_addr) {
+                    qd_log(log, QD_LOG_INFO, "[C%" PRIu64 "] HTTP/1.x client connection established from %s",
+                           hconn->conn_id, conn_addr);
+                    free(conn_addr);
+                }
 
-    case PN_RAW_CONNECTION_CONNECTED: {
-        _setup_client_connection(hconn);
-
-        char *conn_addr = qd_raw_conn_get_address(hconn->raw_conn);
-        if (conn_addr) {
-            qd_log(log, QD_LOG_INFO, "[C%" PRIu64 "] HTTP/1.x client connection established from %s", hconn->conn_id,
-                   conn_addr);
-            free(conn_addr);
+                _setup_client_connection(hconn);
+            }
+            break;
         }
-        break;
-    }
     case PN_RAW_CONNECTION_CLOSED_READ: {
         hconn->q2_blocked = false;
         // TBD: proper client half-close support
@@ -533,7 +610,7 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
 
     // now process all pending raw connection I/O work
 
-    if (_do_raw_io(hconn) == 0) {  // I/O errors are fatal and will close the connection
+    if (_do_io(hconn) == 0) {  // I/O errors are fatal and will close the connection
 
         // Check the head request for completion and advance to next request if
         // done.
