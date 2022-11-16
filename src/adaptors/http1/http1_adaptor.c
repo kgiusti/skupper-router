@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include "adaptors/adaptor_tls.h"
 #include "http1_private.h"
 
 #include <inttypes.h>
@@ -111,6 +112,7 @@ void qdr_http1_connection_free(qdr_http1_connection_t *hconn)
             qdr_http1_client_conn_cleanup(hconn);
 
         h1_codec_connection_free(hconn->http_conn);
+        qd_tls_free(hconn->tls);
         if (rconn) {
             pn_raw_connection_set_context(rconn, 0);
             pn_raw_connection_close(rconn);

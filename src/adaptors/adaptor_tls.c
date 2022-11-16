@@ -897,7 +897,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
 
         taken = 0;
         while (pn_tls_take_encrypt_input_buffers(tls->tls_session, &pn_buf_desc, 1) == 1) {
-            qd_adaptor_buffer_t *abuf = qd_get_adaptor_buffer_from_pn_raw_buffer(&pn_buf_desc);
+            qd_adaptor_buffer_t *abuf = (qd_adaptor_buffer_t *) pn_buf_desc.context;
             assert(abuf);
             qd_adaptor_buffer_free(abuf);
             ++taken;
@@ -937,7 +937,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
 
         taken = 0;
         while (pn_tls_take_decrypt_input_buffers(tls->tls_session, &pn_buf_desc, 1) == 1) {
-            qd_adaptor_buffer_t *abuf = qd_get_adaptor_buffer_from_pn_raw_buffer(&pn_buf_desc);
+            qd_adaptor_buffer_t *abuf = (qd_adaptor_buffer_t *) pn_buf_desc.context;
             assert(abuf);
             qd_adaptor_buffer_free(abuf);
             ++taken;
