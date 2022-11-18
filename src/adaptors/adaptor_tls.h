@@ -26,6 +26,7 @@
 #include "qpid/dispatch/protocol_adaptor.h"
 
 #define QD_TLS_ERROR -1
+#define QD_TLS_EOM   -2  // see qd_tls_take_output_data_cb_t()
 
 typedef struct qd_tls_domain_t qd_tls_domain_t;
 typedef struct qd_tls_t qd_tls_t;
@@ -170,9 +171,11 @@ uint64_t qd_tls_get_encrypted_input_octet_count(const qd_tls_t *tls);   // inbou
  * @param limit - at most limit buffers can be appended during this call. Appending less than limit is acceptable,
  * appending more is an error!
  *
- * @return - the total number of data octets added to the buffer list.
+ * @return - the total number of data octets added to the buffer list or QD_TLS_EOM to indicate that no more application
+ * data will be provided. Returning QD_TLS_EOM will cause the TLS layer to append the TLS closure record to the outbound
+ * encrypted data - this confirms a clean close to the peer. When QD_TLS_EOM is returned the blist MUST be empty.
  */
-typedef uint64_t qd_tls_take_output_data_cb_t(void *context, qd_adaptor_buffer_list_t *blist, size_t limit);
+typedef int64_t qd_tls_take_output_data_cb_t(void *context, qd_adaptor_buffer_list_t *blist, size_t limit);
 
 /**
  * TLS I/O work loop.

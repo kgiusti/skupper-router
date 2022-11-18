@@ -121,6 +121,7 @@ struct qdr_http1_connection_t {
     h1_codec_connection_type_t     type;
     qd_conn_admin_status_t         admin_status;
     qd_conn_oper_status_t          oper_status;
+    int                            tls_error;
 
     struct {
         char *host;
@@ -206,12 +207,12 @@ void qdr_http1_connection_free(qdr_http1_connection_t *hconn);
 void qdr_http1_request_base_cleanup(qdr_http1_request_base_t *hreq);
 void qdr_http1_q2_unblocked_handler(const qd_alloc_safe_ptr_t context);
 
-typedef uint64_t qdr_http1_get_output_data_cb_t(void *context, qd_adaptor_buffer_list_t *a_bufs, size_t limit);
-bool             qdr_http1_do_raw_io(pn_raw_connection_t            *raw_conn,
-                                     qdr_http1_get_output_data_cb_t *get_output_cb,
-                                     void                           *get_output_context,
-                                     qd_adaptor_buffer_list_t       *input_data,
-                                     uint64_t                       *input_octets);
+typedef int64_t qdr_http1_take_output_data_cb_t(void *context, qd_adaptor_buffer_list_t *a_bufs, size_t limit);
+bool            qdr_http1_do_raw_io(pn_raw_connection_t             *raw_conn,
+                                    qdr_http1_take_output_data_cb_t *take_output_cb,
+                                    void                            *take_output_context,
+                                    qd_adaptor_buffer_list_t        *input_data,
+                                    uint64_t                        *input_octets);
 
 #define HTTP1_NUM_ALPN_PROTOCOLS 2
 extern const char *http1_alpn_protocols[HTTP1_NUM_ALPN_PROTOCOLS];

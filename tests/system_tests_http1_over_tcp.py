@@ -45,27 +45,47 @@ class Http1OverTcpOneRouterTest(Http1OneRouterTestBase,
         #      V         V
         #  <clients>  <servers>
 
-        cls.routers = []
-        super(Http1OverTcpOneRouterTest, cls).router('INT.A', 'standalone',
-                                                     [('tcpConnector', {'port': cls.http_server11_port,
-                                                                        'host': '127.0.0.1',
-                                                                        'address': 'testServer11'}),
-                                                      ('tcpConnector', {'port': cls.http_server10_port,
-                                                                        'host': '127.0.0.1',
-                                                                        'address': 'testServer10'}),
-                                                      ('tcpListener', {'port': cls.http_listener11_port,
-                                                                       'host': '127.0.0.1',
-                                                                       'address': 'testServer11'}),
-                                                      ('tcpListener', {'port': cls.http_listener10_port,
-                                                                       'host': '127.0.0.1',
-                                                                       'address': 'testServer10'})
-                                                      ])
+        connector11_config = {'port': cls.server11_port,
+                              'host': cls.server11_host,
+                              'address': 'testServer11'}
+        connector10_config = {'port': cls.server10_port,
+                              'host': cls.server10_host,
+                              'address': 'testServer10'}
+        listener11_config = {'port': cls.listener11_port,
+                             'host': cls.listener11_host,
+                             'address': 'testServer11'}
+        listener10_config = {'port': cls.listener10_port,
+                             'host': cls.listener10_host,
+                             'address': 'testServer10'}
+
+        extra_config = []
+        if cls.connector_ssl_profile is not None:
+            connector11_config.update('sslProfile', cls.connector_ssl_profile['name'])
+            connector10_config.update('sslProfile', cls.connector_ssl_profile['name'])
+            extra_config.extend({'sslProfile': cls.connector_ssl_profile})
+
+        if cls.listener_ssl_profile is not None:
+            listener11_config.update('sslProfile', cls.listener_ssl_profile['name'])
+            listener10_config.update('sslProfile', cls.listener_ssl_profile['name'])
+            extra_config.extend({'sslProfile': cls.listener_ssl_profile})
+
+        super(Http1OverTcpOneRouterTest,
+              cls).router('INT.A', 'standalone',
+                          [('tcpConnector', connector11_config),
+                           ('tcpConnector', connector10_config),
+                           ('tcpListener', listener11_config),
+                           ('tcpListener', listener10_config)
+                           ] + extra_config)
 
         cls.INT_A = cls.routers[0]
         cls.INT_A.listener = cls.INT_A.addresses[0]
 
-        cls.http11_server = TestServer.new_server(cls.http_server11_port, cls.http_listener11_port, cls.TESTS_11)
-        cls.http10_server = TestServer.new_server(cls.http_server10_port, cls.http_listener10_port, cls.TESTS_10,
+        cls.http11_server = TestServer.new_server(server_port=cls.server11_port,
+                                                  client_port=cls.listener11_port,
+                                                  tests=cls.TESTS_11)
+        cls.http10_server = TestServer.new_server(server_port=cls.server10_port,
+                                                  client_port=cls.listener10_port,
+                                                  tests=cls.TESTS_10,
                                                   handler_cls=RequestHandler10)
         cls.INT_A.wait_connectors()
         wait_tcp_listeners_up(cls.INT_A.listener)

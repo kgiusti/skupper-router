@@ -22,7 +22,8 @@ import socket
 import uuid
 import weakref
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPSConnection
+from ssl import SSLContext
 from threading import Thread, Event
 from time import sleep, time
 
@@ -149,7 +150,8 @@ class RequestHandler10(RequestHandler):
 class MyHTTPServer(HTTPServer):
     """Adds a switch to the HTTPServer to allow it to exit gracefully"""
 
-    def __init__(self, addr, handler_cls, testcases, logger):
+    def __init__(self, addr, handler_cls, testcases, logger,
+                 ssl_context: Optional[SSLContext] = None):
         super().__init__(addr, handler_cls)
         self._client_sockets: List[socket.socket] = []
 
@@ -157,10 +159,13 @@ class MyHTTPServer(HTTPServer):
         self.system_tests = testcases
         self.request_count = 0
         self.logger = logger
+        self.my_ssl_context = ssl_context
 
     def get_request(self) -> Tuple[socket.socket, Any]:
         """Remember the client socket"""
         sock, addr = super().get_request()
+        if self.my_ssl_context is not None:
+            sock = self.my_ssl_context.wrap_socket(sock, server_side=True)
         self._client_sockets.append(sock)
         return sock, addr
 
@@ -185,13 +190,15 @@ class ThreadedTestClient:
     An HTTP client running in a separate thread
     """
 
-    def __init__(self, tests, port, repeat=1, wait=True, timeout=TIMEOUT):
+    def __init__(self, tests, port, repeat=1, wait=True, timeout=TIMEOUT,
+                 ssl_context: Optional[SSLContext] = None):
         self.error = None
         self._id = uuid.uuid4().hex
         self._conn_addr = ("127.0.0.1:%s" % port)
         self._tests = tests
         self._repeat = repeat
         self._count = 0
+        self._ssl_context = ssl_context
         self._logger = Logger(title="TestClient: %s" % self._id,
                               print_to_console=False)
         self._thread = Thread(target=self._run, args=(wait, timeout), daemon=True)
@@ -199,7 +206,10 @@ class ThreadedTestClient:
 
     def _run(self, wait, timeout):
         self._logger.log("TestClient connecting on %s" % self._conn_addr)
-        client = HTTPConnection(self._conn_addr, timeout=timeout)
+        if self._ssl_context is not None:
+            client = HTTPSConnection(self._conn_addr, timeout=timeout, context=self._ssl_context)
+        else:
+            client = HTTPConnection(self._conn_addr, timeout=timeout)
         deadline = timeout + time()
         while True:
             # wait for listener socket to initialize
@@ -276,13 +286,15 @@ class TestServer:
     __test__ = False
     _active_servers: Mapping[int, 'TestServer'] = weakref.WeakValueDictionary()
 
-    def __init__(self, server_port, client_port, tests, handler_cls=None):
+    def __init__(self, server_port: int, client_port: int, tests, handler_cls=None,
+                 ssl_context: Optional[SSLContext] = None):
         self._request_count = 0
         self._logger = Logger(title=f"TestServer:{server_port}",
                               print_to_console=False)
         self._client_port = client_port
         self._server_addr = ("", server_port)
         self._server_error = None
+        self._ssl_context = ssl_context
         self._is_ready = Event()
         self._thread = Thread(target=self._run, args=(tests,
                                                       handler_cls or
@@ -296,7 +308,8 @@ class TestServer:
         self._is_ready.wait(TIMEOUT)
 
     @classmethod
-    def new_server(cls, server_port, client_port, tests, handler_cls=None):
+    def new_server(cls, server_port: int, client_port: int, tests, handler_cls=None,
+                   ssl_context: Optional[SSLContext] = None):
         """Repeatedly tries to create a new server.
 
         Always use this factory method, otherwise the mechanism
@@ -308,7 +321,8 @@ class TestServer:
                 server = TestServer(server_port=server_port,
                                     client_port=client_port,
                                     tests=tests,
-                                    handler_cls=handler_cls)
+                                    handler_cls=handler_cls,
+                                    ssl_context=ssl_context)
                 cls._active_servers[server_port] = server
                 return server
             except OSError as e:
@@ -323,7 +337,8 @@ class TestServer:
     def _run(self, tests, handler_cls):
         self._logger.log("TestServer listening on %s:%s" % self._server_addr)
 
-        with MyHTTPServer(self._server_addr, handler_cls, tests, self._logger) as server:
+        with MyHTTPServer(self._server_addr, handler_cls, tests, self._logger,
+                          ssl_context=self.ssl_context) as server:
             server.allow_reuse_address = True
             server.timeout = TIMEOUT
             server.server_killed = False
@@ -914,6 +929,8 @@ class CommonHttp1Edge2EdgeTest:
 
 
 class CommonHttp1OneRouterTest:
+    # Base tests for HTTP/1 One Router tests. Use Http1OneRouterTestBase to
+    # derive One Router test classes
     TESTS_11 = {
         #
         # GET
@@ -1251,6 +1268,19 @@ class CommonHttp1OneRouterTest:
         ]
     }
 
+    @staticmethod
+    def create_client(host_port, timeout=TIMEOUT):
+        """Creates basic HTTPConnection. May be overridden for SSL support"""
+        return HTTPConnection(host_port, timeout)
+
+    @staticmethod
+    def create_server(server_port, client_port, tests, handler_cls=None):
+        """Creates basic HTTP TestServer. May be overridden for SSL support"""
+        return TestServer.new_server(server_port=server_port,
+                                     client_port=client_port,
+                                     tests=tests,
+                                     handler_cls=handler_cls)
+
     def _do_request(self, client, tests):
         for req, _, val in tests:
             req.send_request(client)
@@ -1264,50 +1294,43 @@ class CommonHttp1OneRouterTest:
                 self.assertEqual(b'', body)
 
     def test_001_get(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener11_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener11_host_port)
         self._do_request(client, self.TESTS_11["GET"])
         client.close()
 
     def test_002_head(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener11_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener11_host_port)
         self._do_request(client, self.TESTS_11["HEAD"])
         client.close()
 
     def test_003_post(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener11_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener11_host_port)
         self._do_request(client, self.TESTS_11["POST"])
         client.close()
 
     def test_004_put(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener11_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener11_host_port)
         self._do_request(client, self.TESTS_11["PUT"])
         client.close()
 
     def test_006_head_10(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener10_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener10_host_port)
         self._do_request(client, self.TESTS_10["HEAD"])
         client.close()
 
     def test_007_post_10(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener10_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener10_host_port)
         self._do_request(client, self.TESTS_10["POST"])
         client.close()
 
     def test_008_put_10(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener10_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener10_host_port)
         self._do_request(client, self.TESTS_10["PUT"])
         client.close()
 
 
 class Http1OneRouterTestBase(TestCase):
-    # HTTP/1.1 compliant test cases
+    # HTTP/1.1 One Router test setup
 
     @classmethod
     def router(cls, name, mode, extra):
@@ -1331,10 +1354,21 @@ class Http1OneRouterTestBase(TestCase):
         """Start a router"""
         super(Http1OneRouterTestBase, cls).setUpClass()
 
-        cls.http_server11_port = cls.tester.get_port()
-        cls.http_server10_port = cls.tester.get_port()
-        cls.http_listener11_port = cls.tester.get_port()
-        cls.http_listener10_port = cls.tester.get_port()
+        cls.routers = []
+
+        cls.server11_host = '127.0.0.1'
+        cls.server11_port = cls.tester.get_port()
+        cls.server11_host_port = f"127.0.0.1:{cls.server11_port}"
+
+        cls.listener11_host = '0.0.0.0'
+        cls.listener11_port = cls.tester.get_port()
+
+        cls.server10_host = '127.0.0.1'
+        cls.server10_port = cls.tester.get_port()
+        cls.server10_host_port = f"127.0.0.1:{cls.server10_port}"
+
+        cls.listener10_host = '0.0.0.0'
+        cls.listener10_port = cls.tester.get_port()
 
 
 class Http1Edge2EdgeTestBase(TestCase):

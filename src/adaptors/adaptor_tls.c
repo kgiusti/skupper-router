@@ -55,6 +55,8 @@ struct qd_tls_t {
 
     uint64_t encrypted_output_bytes;
     uint64_t encrypted_input_bytes;
+
+    int outstanding_bufs;
 };
 
 ALLOC_DECLARE(qd_tls_t);
@@ -356,11 +358,27 @@ void qd_tls_free(qd_tls_t *tls)
 {
     if (tls) {
         if (tls->tls_session) {
+            fprintf(stdout, "PRE-STOP: DECRYPT OUTPUT BUFFER COUNT: %zu\n"
+                    "ENCRYPT OUTPUT BUFFER COUNT: %zu\n",
+                    pn_tls_get_decrypt_output_buffer_count(tls->tls_session),
+                    pn_tls_get_encrypt_output_buffer_count(tls->tls_session));
+
             pn_tls_stop(tls->tls_session);
             take_back_encrypt_output_buffs(tls);
             take_back_decrypt_output_buffs(tls);
             take_back_encrypt_input_buffs(tls);
             take_back_decrypt_input_buffs(tls);
+
+            fprintf(stdout, "POST-CLEAN: DECRYPT OUTPUT BUFFER COUNT: %zu\n"
+                    "ENCRYPT OUTPUT BUFFER COUNT: %zu\n",
+                    pn_tls_get_decrypt_output_buffer_count(tls->tls_session),
+                    pn_tls_get_encrypt_output_buffer_count(tls->tls_session));
+
+
+            fprintf(stdout, "OUTSTANDING=%d\n", tls->outstanding_bufs);
+            
+            fflush(stdout);
+                    
             pn_tls_free(tls->tls_session);
             tls->tls_session = 0;
         }
@@ -407,12 +425,18 @@ static void take_back_encrypt_output_buffs(qd_tls_t *tls)
     pn_raw_buffer_t take_incoming_buf;
     size_t          take_input_count;
 
+    uint64_t octets = 0;
+    size_t count = 0;
     while ((take_input_count = pn_tls_take_encrypt_output_buffers(tls->tls_session, &take_incoming_buf, 1))) {
         assert(take_input_count == 1);
         (void) take_input_count;  // prevent unused variable warning
+        count++;
+        octets += take_incoming_buf.size;
         qd_adaptor_buffer_t *adaptor_buff = (qd_adaptor_buffer_t *) take_incoming_buf.context;
         qd_adaptor_buffer_free(adaptor_buff);
+        tls->outstanding_bufs -= 1;
     }
+    fprintf(stdout, "TAKE BACK ENCRYPT OUTPUT BUFFS: %zu OCTETS: %" PRIu64 "\n", count, octets);
 }
 
 static void take_back_decrypt_output_buffs(qd_tls_t *tls)
@@ -420,12 +444,18 @@ static void take_back_decrypt_output_buffs(qd_tls_t *tls)
     pn_raw_buffer_t take_incoming_buf;
     size_t          take_input_count;
 
+    uint64_t octets = 0;
+    size_t count = 0;
     while ((take_input_count = pn_tls_take_decrypt_output_buffers(tls->tls_session, &take_incoming_buf, 1))) {
         assert(take_input_count == 1);
         (void) take_input_count;  // prevent unused variable warning
+        count++;
+        octets += take_incoming_buf.size;
         qd_adaptor_buffer_t *adaptor_buff = (qd_adaptor_buffer_t *) take_incoming_buf.context;
         qd_adaptor_buffer_free(adaptor_buff);
+        tls->outstanding_bufs -= 1;
     }
+    fprintf(stdout, "TAKE BACK DECRYPT OUTPUT BUFFS: %zu OCTETS: %" PRIu64 "\n", count, octets);
 }
 
 static void take_back_encrypt_input_buffs(qd_tls_t *tls)
@@ -433,12 +463,18 @@ static void take_back_encrypt_input_buffs(qd_tls_t *tls)
     pn_raw_buffer_t take_incoming_buf;
     size_t          take_input_count;
 
+    uint64_t octets = 0;
+    size_t count = 0;
     while ((take_input_count = pn_tls_take_encrypt_input_buffers(tls->tls_session, &take_incoming_buf, 1))) {
         assert(take_input_count == 1);
         (void) take_input_count;  // prevent unused variable warning
+        count++;
+        octets += take_incoming_buf.size;
         qd_adaptor_buffer_t *adaptor_buff = (qd_adaptor_buffer_t *) take_incoming_buf.context;
         qd_adaptor_buffer_free(adaptor_buff);
+        tls->outstanding_bufs -= 1;
     }
+    fprintf(stdout, "TAKE BACK ENCRYPT INPUT BUFFS: %zu OCTETS: %" PRIu64 "\n", count, octets);
 }
 
 /**
@@ -449,12 +485,19 @@ static void take_back_decrypt_input_buffs(qd_tls_t *tls)
 {
     pn_raw_buffer_t take_incoming_buf;
     size_t          take_input_count;
+
+    uint64_t octets = 0;
+    size_t count = 0;
     while ((take_input_count = pn_tls_take_decrypt_input_buffers(tls->tls_session, &take_incoming_buf, 1))) {
         assert(take_input_count == 1);
         (void) take_input_count;  // prevent unused variable warning
+        count++;
+        octets += take_incoming_buf.size;
         qd_adaptor_buffer_t *adaptor_buff = (qd_adaptor_buffer_t *) take_incoming_buf.context;
         qd_adaptor_buffer_free(adaptor_buff);
+        tls->outstanding_bufs -= 1;
     }
+    fprintf(stdout, "TAKE BACK DECRYPT INPUT BUFFS: %zu OCTETS: %" PRIu64 "\n", count, octets);
 }
 
 static size_t get_pn_raw_buffer_fetch_size(qd_tls_t *tls)
@@ -755,9 +798,11 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             work = true;
             while (capacity-- > 0) {
                 (void) qd_adaptor_buffer_raw(&pn_buf_desc);
+                fprintf(stdout, "GIVE EMPTY ENCRYPT OUTPUT %p\n", (void *)pn_buf_desc.context);
                 given = pn_tls_give_encrypt_output_buffers(tls->tls_session, &pn_buf_desc, 1);
                 (void) given;
                 assert(given == 1);
+                tls->outstanding_bufs += 1;
             }
         }
 
@@ -769,15 +814,15 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             if (capacity > 0) {
                 qd_adaptor_buffer_list_t ubufs = DEQ_EMPTY;
 
-                total_octets = take_output_cb(take_output_context, &ubufs, capacity);
-                if (DEQ_SIZE(ubufs) > 0) {
+                int64_t out_octets = take_output_cb(take_output_context, &ubufs, capacity);
+                if (out_octets > 0) {
                     work = true;
-                    assert(DEQ_SIZE(ubufs) <= capacity);
+                    assert(!DEQ_IS_EMPTY(bufs) && DEQ_SIZE(ubufs) <= capacity);
                     qd_log(tls->log_source,
                            QD_LOG_TRACE,
-                           "[C%" PRIu64 "] %" PRIu64 " unencrypted octets taken by TLS for encryption (%zu buffers)",
+                           "[C%" PRIu64 "] %" PRIi64 " unencrypted octets taken by TLS for encryption (%zu buffers)",
                            tls->conn_id,
-                           total_octets,
+                           out_octets,
                            DEQ_SIZE(ubufs));
                     qd_adaptor_buffer_t *abuf = DEQ_HEAD(ubufs);
                     while (abuf) {
@@ -786,6 +831,13 @@ int qd_tls_do_io(qd_tls_t                     *tls,
                         given = pn_tls_give_encrypt_input_buffers(tls->tls_session, &pn_buf_desc, 1);
                         assert(given == 1);
                         abuf = DEQ_HEAD(ubufs);
+                        tls->outstanding_bufs += 1;
+                    }
+                } else {
+                    assert(DEQ_IS_EMPTY(ubufs));
+                    if (out_octets == QD_TLS_EOM) {
+                        work = true;
+                        pn_tls_close_output(tls->tls_session);
                     }
                 }
             }
@@ -802,9 +854,12 @@ int qd_tls_do_io(qd_tls_t                     *tls,
                    capacity);
             work = true;
             while (capacity-- > 0) {
+                // kag leak:
                 (void) qd_adaptor_buffer_raw(&pn_buf_desc);
+                fprintf(stdout, "GIVE EMPTY DECRYPT OUTPUT %p\n", (void *)pn_buf_desc.context);
                 given = pn_tls_give_decrypt_output_buffers(tls->tls_session, &pn_buf_desc, 1);
                 assert(given == 1);
+                tls->outstanding_bufs += 1;
             }
         }
 
@@ -817,7 +872,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             while (pushed < capacity) {
                 taken = pn_raw_connection_take_read_buffers(raw_conn, &pn_buf_desc, 1);
                 if (taken == 0) {
-                    // no available encrypted data
+                    // no available encrypted data or read closed
                     break;
                 }
                 if (pn_buf_desc.size) {
@@ -825,6 +880,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
                     given = pn_tls_give_decrypt_input_buffers(tls->tls_session, &pn_buf_desc, 1);
                     assert(given == 1);
                     ++pushed;
+                    tls->outstanding_bufs += 1;
                 } else {
                     qd_adaptor_buffer_free((qd_adaptor_buffer_t *) pn_buf_desc.context);
                 }
@@ -840,6 +896,15 @@ int qd_tls_do_io(qd_tls_t                     *tls,
                        tls->conn_id,
                        total_octets,
                        pushed);
+            }
+        } else if (pn_tls_get_session_error(tls->tls_session) || pn_tls_is_input_closed(tls->tls_session)) {
+            // TLS will not take any more encrypted input - drain the raw conn input
+            int drained = qd_raw_connection_drain_read_buffers(raw_conn);
+            if (drained) {
+                work = true;  // I assume we need to keep draining until raw conn is closed
+                qd_log(tls->log_source, QD_LOG_TRACE,
+                       "[C%" PRIu64 "] discarded %d read raw buffers due to TLS session closed",
+                       tls->conn_id, drained);
             }
         }
 
@@ -871,15 +936,16 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             size_t pushed = 0;
             total_octets  = 0;
             while (pushed < capacity) {
-                pn_raw_buffer_t pn_buf_desc;
                 taken = pn_tls_take_encrypt_output_buffers(tls->tls_session, &pn_buf_desc, 1);
                 if (taken != 1) {
                     break;
                 }
+                fprintf(stdout, "TAKE FULL ENCRYPT OUTPUT %p (%u octets)\n", (void *)pn_buf_desc.context, pn_buf_desc.size);
                 total_octets += pn_buf_desc.size;
                 given = pn_raw_connection_write_buffers(raw_conn, &pn_buf_desc, 1);
                 assert(given == 1);
                 ++pushed;
+                tls->outstanding_bufs -= 1;
             }
             if (pushed > 0) {
                 work = true;
@@ -891,6 +957,21 @@ int qd_tls_do_io(qd_tls_t                     *tls,
                        total_octets,
                        pushed);
             }
+        } else if (pn_raw_connection_is_write_closed(raw_conn)) {
+            // drain the TLS buffers - there is no place to send them!
+            taken = 0;
+            while (pn_tls_take_encrypt_output_buffers(tls->tls_session, &pn_buf_desc, 1) == 1) {
+                assert(pn_buf_desc.context);
+                qd_adaptor_buffer_free((qd_adaptor_buffer_t *) pn_buf_desc.context);
+                taken += 1;
+            }
+            if (taken) {
+                work = true;  // keep draining encrypted output
+                tls->outstanding_bufs -= taken;
+                qd_log(tls->log_source, QD_LOG_TRACE,
+                       "[C%" PRIu64 "] discarded %zu outgoing encrypted buffers due to raw conn write closed",
+                       tls->conn_id, taken);
+            }
         }
 
         // free all old unencrypted input buffers
@@ -901,6 +982,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             assert(abuf);
             qd_adaptor_buffer_free(abuf);
             ++taken;
+            tls->outstanding_bufs -= 1;
         }
         if (taken > 0) {
             work = true;
@@ -917,6 +999,8 @@ int qd_tls_do_io(qd_tls_t                     *tls,
         taken        = 0;
         while (pn_tls_take_decrypt_output_buffers(tls->tls_session, &pn_buf_desc, 1) == 1) {
             qd_adaptor_buffer_t *abuf = qd_get_adaptor_buffer_from_pn_raw_buffer(&pn_buf_desc);
+
+            fprintf(stdout, "TAKE FULL DECRYPT OUTPUT %p (%u octets)\n", (void *)pn_buf_desc.context, pn_buf_desc.size);
             if (pn_buf_desc.size) {
                 total_octets += pn_buf_desc.size;
                 DEQ_INSERT_TAIL(*input_data, abuf);
@@ -924,6 +1008,9 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             } else {
                 qd_adaptor_buffer_free(abuf);
             }
+
+                tls->outstanding_bufs -= 1;
+
         }
         if (taken) {
             work = true;
@@ -941,6 +1028,7 @@ int qd_tls_do_io(qd_tls_t                     *tls,
             assert(abuf);
             qd_adaptor_buffer_free(abuf);
             ++taken;
+                tls->outstanding_bufs -= 1;
         }
         if (taken > 0) {
             work = true;

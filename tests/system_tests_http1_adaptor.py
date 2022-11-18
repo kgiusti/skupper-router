@@ -25,10 +25,10 @@ import errno
 import json
 import select
 import socket
+from ssl import SSLContext
 from time import sleep, time
 from typing import Optional
 from email.parser import BytesParser
-from http.client import HTTPConnection
 
 from proton import Message
 from system_test import TestCase, unittest, main_module, Qdrouterd, QdManager
@@ -57,7 +57,8 @@ class SimpleRequestTimeout(Exception):
 def http1_simple_request(raw_request: bytes,
                          port: int,
                          host: Optional[str] = '127.0.0.1',
-                         timeout: Optional[float] = TIMEOUT):
+                         timeout: Optional[float] = TIMEOUT,
+                         ssl_context: Optional[SSLContext] = None):
     """Perform a simple HTTP/1 request and return the response read from the
     server. raw_request is a complete HTTP/1 request message. The client socket
     will be read from until either it is closed or the TIMEOUT occurs.
@@ -67,6 +68,8 @@ def http1_simple_request(raw_request: bytes,
     """
     reply = b''
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        if ssl_context is not None:
+            client = ssl_context.wrap_socket(client, server_side=False)
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client.settimeout(timeout)
 
@@ -340,37 +343,52 @@ class Http1AdaptorOneRouterTest(Http1OneRouterTestBase,
         #      V         V
         #  <clients>  <servers>
 
-        cls.routers = []
+        connector11_config = {'port': cls.server11_port,
+                              'host': cls.server11_host,
+                              'protocolVersion': 'HTTP1',
+                              'address': 'testServer11'}
+        connector10_config = {'port': cls.server10_port,
+                              'host': cls.server10_host,
+                              'protocolVersion': 'HTTP1',
+                              'address': 'testServer10'}
+        listener11_config = {'port': cls.listener11_port,
+                             'host': cls.listener11_host,
+                             'protocolVersion': 'HTTP1',
+                             'address': 'testServer11'}
+        listener10_config = {'port': cls.listener10_port,
+                             'host': cls.listener10_host,
+                             'protocolVersion': 'HTTP1',
+                             'address': 'testServer10'}
+
+        extra_config = []
+        if cls.connector_ssl_profile is not None:
+            connector11_config.update('sslProfile', cls.connector_ssl_profile['name'])
+            connector10_config.update('sslProfile', cls.connector_ssl_profile['name'])
+            extra_config.extend({'sslProfile': cls.connector_ssl_profile})
+
+        if cls.listener_ssl_profile is not None:
+            listener11_config.update('sslProfile', cls.listener_ssl_profile['name'])
+            listener10_config.update('sslProfile', cls.listener_ssl_profile['name'])
+            extra_config.extend({'sslProfile': cls.listener_ssl_profile})
+
         super(Http1AdaptorOneRouterTest, cls).\
             router('INT.A', 'standalone',
-                   [('httpConnector', {'port': cls.http_server11_port,
-                                       'host': '127.0.0.1',
-                                       'protocolVersion': 'HTTP1',
-                                       'address': 'testServer11'}),
-                    ('httpConnector', {'port': cls.http_server10_port,
-                                       'host': '127.0.0.1',
-                                       'protocolVersion': 'HTTP1',
-                                       'address': 'testServer10'}),
-                    ('httpListener', {'port': cls.http_listener11_port,
-                                      'protocolVersion': 'HTTP1',
-                                      'host': '127.0.0.1',
-                                      'address': 'testServer11'}),
-                    ('httpListener', {'port': cls.http_listener10_port,
-                                      'protocolVersion': 'HTTP1',
-                                      'host': '127.0.0.1',
-                                      'address': 'testServer10'})
-                    ])
+                   [('httpConnector', connector11_config),
+                    ('httpConnector', connector10_config),
+                    ('httpListener', listener11_config),
+                    ('httpListener', listener10_config)
+                    ] + extra_config)
 
         cls.INT_A = cls.routers[0]
         cls.INT_A.listener = cls.INT_A.addresses[0]
 
-        cls.http11_server = TestServer.new_server(server_port=cls.http_server11_port,
-                                                  client_port=cls.http_listener11_port,
-                                                  tests=cls.TESTS_11)
-        cls.http10_server = TestServer.new_server(server_port=cls.http_server10_port,
-                                                  client_port=cls.http_listener10_port,
-                                                  tests=cls.TESTS_10,
-                                                  handler_cls=RequestHandler10)
+        cls.http11_server = cls.create_server(server_port=cls.server11_port,
+                                              client_port=cls.listener11_port,
+                                              tests=cls.TESTS_11)
+        cls.http10_server = cls.create_server(server_port=cls.server10_port,
+                                              client_port=cls.listener10_port,
+                                              tests=cls.TESTS_10,
+                                              handler_cls=RequestHandler10)
         cls.INT_A.wait_connectors()
         wait_http_listeners_up(cls.INT_A.addresses[0])
 
@@ -381,17 +399,16 @@ class Http1AdaptorOneRouterTest(Http1OneRouterTestBase,
         super().tearDownClass()
 
     def test_005_get_10(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener10_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener10_host_port)
         self._do_request(client, self.TESTS_10["GET"])
         client.close()
 
     def test_000_stats(self):
-        client = HTTPConnection("127.0.0.1:%s" % self.http_listener11_port,
-                                timeout=TIMEOUT)
+        client = self.create_client(self.listener11_host_port)
         self._do_request(client, self.TESTS_11["GET"])
         self._do_request(client, self.TESTS_11["POST"])
         client.close()
+
         qd_manager = QdManager(address=self.INT_A.listener)
         stats = qd_manager.query('io.skupper.router.httpRequestInfo')
         self.assertEqual(len(stats), 2)
@@ -417,6 +434,19 @@ class Http1AdaptorOneRouterTest(Http1OneRouterTestBase,
             assert_approximately_equal(stats[0].get('bytesIn'), 1059)
             assert_approximately_equal(stats[1].get('bytesOut'), 1059)
             assert_approximately_equal(stats[1].get('bytesIn'), 8830)
+
+
+# class Http1AdaptorOneRouterTLSTest(Http1AdaptorOneRouterTest):
+#     """
+#     Run the One Router tests using a TLS enabled client
+#     """
+#     @classmethod
+#     def setUpClass(cls):
+#         super(Http1AdaptorOneRouterTest, cls).setUpClass()
+
+#     def _create_client(self, host_port, timeout=TIMEOUT):
+#         # overrides base class method
+#         return HTTPSConnection(host_port, timeout=timeout, context=self._ssl_context)
 
 
 class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase,

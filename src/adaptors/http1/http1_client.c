@@ -69,6 +69,7 @@ DEQ_DECLARE(_client_response_msg_t, _client_response_msg_list_t);
 // and encoded/decoded by the HTTP codec.
 // - All _client_response_msg_t's owned by the _client_request_t have been released
 // - The AMQP message holding the encoded HTTP Request has been settled by the core (remote state)
+// see _is_request_complete()
 //
 // If an unrecoverable error occurs the raw connection will be immediately closed and the HTTP connection,
 // qdr_connection_t, etc will be destroyed.
@@ -128,6 +129,15 @@ static void _client_request_free(_client_request_t *req);
 static void _deliver_request(qdr_http1_connection_t *hconn, _client_request_t *req);
 static bool _find_token(const char *list, const char *value);
 static void _generate_response_msg(_client_request_t *hreq, int code, const char *reason, const char *text_body);
+
+// return true if the HTTP request (and response(s)) have been fully decoded/encoded. It is safe to release the hreq at
+// this point, however keep in mind that encoded response data may still be queued for output in the raw connection/TLS
+// layer.
+//
+static inline bool _is_request_completed(const _client_request_t *hreq)
+{
+    return hreq->codec_completed && DEQ_IS_EMPTY(hreq->responses) && hreq->request_settled;
+}
 
 ////////////////////////////////////////////////////////
 // HTTP/1.x Client Listener
@@ -390,9 +400,9 @@ static void _replenish_empty_read_buffers(qdr_http1_connection_t *hconn)
     }
 }
 
-static uint64_t _take_output_data(void *context, qd_adaptor_buffer_list_t *abufs, size_t limit)
+static int64_t _take_output_data(void *context, qd_adaptor_buffer_list_t *abufs, size_t limit)
 {
-    uint64_t                total_octets = 0;
+    int64_t                 total_octets = 0;
     qdr_http1_connection_t *hconn        = (qdr_http1_connection_t *) context;
 
     assert(hconn);
@@ -415,9 +425,16 @@ static uint64_t _take_output_data(void *context, qd_adaptor_buffer_list_t *abufs
 
     if (total_octets) {
         qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE,
-               "[C%" PRIu64 "] queueing %" PRIu64 " encoded octets for raw conn output (%zu buffers)", hconn->conn_id,
+               "[C%" PRIu64 "] queueing %" PRIi64 " encoded octets for output (%zu buffers)", hconn->conn_id,
                total_octets, DEQ_SIZE(*abufs));
         hconn->out_http1_octets += total_octets;
+    } else {
+        // check if this request is completed and if the connection is to be closed. If so signal that to the caller:
+        if (hreq && _is_request_completed(hreq) && hreq->close_on_complete) {
+            qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE,
+                   "[C%" PRIu64 "] request completed: no further encoded octets for output", hconn->conn_id);
+            total_octets = QD_TLS_EOM;
+        }
     }
     return total_octets;
 }
@@ -458,12 +475,16 @@ static int _do_tls_io(qdr_http1_connection_t *hconn)
 
     assert(hconn->raw_conn);
 
+    if (hconn->tls_error)
+        return hconn->tls_error;
+
     do {
         uint64_t octets = 0;
         rx_data         = false;
 
         error = qd_tls_do_io(hconn->tls, hconn->raw_conn, _take_output_data, (void *) hconn, &in_abufs, &octets);
         if (error) {
+            hconn->tls_error = error;
             qd_adaptor_buffer_list_free_buffers(&in_abufs);
             qdr_http1_close_connection(hconn, "TLS connection I/O failed");
         } else if (!DEQ_IS_EMPTY(in_abufs)) {
@@ -541,6 +562,7 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
     case PN_RAW_CONNECTION_DISCONNECTED: {
         qd_log(log, QD_LOG_INFO, "[C%"PRIu64"] HTTP/1.x client disconnected", hconn->conn_id);
         pn_raw_connection_set_context(hconn->raw_conn, 0);
+        qd_raw_connection_drain_read_write_buffers(hconn->raw_conn);
 
         // prevent core from waking this connection
         sys_mutex_lock(&qdr_http1_adaptor->lock);
@@ -623,7 +645,7 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
                    DEQ_SIZE(hreq->responses), hreq->close_on_complete ? "Close on Complete:" : ":",
                    hreq->request_settled ? "Settled:" : ":");
 
-            if (hreq->codec_completed && DEQ_IS_EMPTY(hreq->responses) && hreq->request_settled) {
+            if (_is_request_completed(hreq)) {
                 const bool need_close = hreq->close_on_complete;
 
                 qd_log(log, QD_LOG_DEBUG, "[C%" PRIu64 "] HTTP request msg-id=%" PRIu64 " completed!", hconn->conn_id,
