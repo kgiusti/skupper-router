@@ -336,7 +336,7 @@ static int handle_incoming_raw_read(qdr_tcp_connection_t *conn, qd_buffer_list_t
         pn_raw_buffer_t raw_buffers[RAW_BUFFER_BATCH];
         size_t          n;
         while ((n = pn_raw_connection_take_read_buffers(conn->pn_raw_conn, raw_buffers, RAW_BUFFER_BATCH))) {
-            for (size_t i = 0; i < n && raw_buffers[i].bytes; ++i) {
+            for (size_t i = 0; i < n; ++i) {
                 qd_adaptor_buffer_t *buf           = (qd_adaptor_buffer_t *) raw_buffers[i].context;
                 uint32_t             raw_buff_size = raw_buffers[i].size;
                 if (raw_buff_size > 0) {
@@ -344,11 +344,14 @@ static int handle_incoming_raw_read(qdr_tcp_connection_t *conn, qd_buffer_list_t
                     qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG,
                            "[C%" PRIu64 "] pn_raw_connection_take_read_buffers() took buffer with %lu bytes",
                            conn->conn_id, raw_buff_size);
-                    if (buffers)
+                    if (buffers) {
+                        assert(raw_buffers[i].bytes);
                         qd_buffer_list_append(buffers, (uint8_t *) (raw_buffers[i].bytes + raw_buffers[i].offset),
                                               raw_buffers[i].size);
+                    }
                 }
                 // Free the wire buffer that we got back from proton.
+                assert(buf);
                 qd_adaptor_buffer_free(buf);
             }
         }
