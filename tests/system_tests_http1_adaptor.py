@@ -23,6 +23,7 @@
 
 import errno
 import json
+import re
 import select
 import socket
 from time import sleep, time
@@ -33,7 +34,7 @@ from http.client import HTTPConnection
 from proton import Message
 from system_test import TestCase, unittest, main_module, Qdrouterd, QdManager
 from system_test import TIMEOUT, AsyncTestSender, AsyncTestReceiver
-from system_test import retry_exception, curl_available, run_curl
+from system_test import retry_exception, curl_available, run_curl, retry
 from http1_tests import http1_ping, TestServer, RequestHandler10
 from http1_tests import RequestMsg, ResponseMsg
 from http1_tests import ThreadedTestClient, Http1OneRouterTestBase
@@ -45,6 +46,27 @@ from http1_tests import Http1CurlTestsMixIn
 from http1_tests import wait_http_listeners_up
 from http1_tests import HttpAdaptorListenerConnectTestBase
 from http1_tests import HttpTlsBadConfigTestsBase
+
+
+@staticmethod
+def _read_socket(sock, length, timeout=TIMEOUT):
+    """
+    Read data from socket until either length octets are read or the socket
+    closes.  Return all data read.
+    """
+    old_timeout = sock.gettimeout()
+    sock.settimeout(timeout)
+    data = b''
+
+    try:
+        while len(data) < length:
+            chunk = sock.recv(length - len(data))
+            if not chunk:  # socket closed
+                break
+            data += chunk
+    finally:
+        sock.settimeout(old_timeout)
+    return data
 
 
 class SimpleRequestTimeout(Exception):
@@ -454,10 +476,12 @@ class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase,
             router('EA1', 'edge',
                    [('connector', {'name': 'uplink', 'role': 'edge',
                                    'port': cls.INTA_edge1_port}),
-                    ('httpListener', {'port': cls.http_listener11_port,
+                    ('httpListener', {'name': 'L_testServer11',
+                                      'port': cls.http_listener11_port,
                                       'protocolVersion': 'HTTP1',
                                       'address': 'testServer11'}),
-                    ('httpListener', {'port': cls.http_listener10_port,
+                    ('httpListener', {'name': 'L_testServer10',
+                                      'port': cls.http_listener10_port,
                                       'protocolVersion': 'HTTP1',
                                       'address': 'testServer10'})
                     ])
@@ -516,6 +540,139 @@ class Http1AdaptorEdge2EdgeTest(Http1Edge2EdgeTestBase,
         """
         self.curl_post_test("127.0.0.1", self.http_listener11_port,
                             self.http_server11_port)
+
+    def _wait_server11_deliveries(self):
+        count = 0
+        links = self.EA2.qd_manager.query('io.skupper.router.router.link')
+        for link in filter(lambda link:
+                           link['linkName'] == 'http1.server.out' and
+                           link['owningAddr'].endswith('testServer11'),
+                           links):
+            count += link['undeliveredCount'] + link['unsettledCount']
+            return count
+
+    def _get_client11_count(self):
+        links = self.EA1.qd_manager.query('io.skupper.router.router.link')
+        return len(list(filter(lambda link:
+                               link['linkName'] == 'http1.client.in' and
+                               link['owningAddr'].endswith('testServer11'),
+                               links)))
+
+    def test_3000_N_client_pipeline_cancel(self):
+        """
+        Create N clients, send N requests, close some clients, server should
+        handle the remaining requests properly
+        """
+
+        # note: this test assumes server-side is synchronous. It will need to
+        # be re-written if server-facing pipelining is implemented!
+
+        CLIENT_COUNT = 10
+        KILL_INDEX = [4, 5]  # clients to force close
+
+        request = b'GET /client_pipeline HTTP/1.1\r\n' \
+            + b'index: %d\r\n' \
+            + b'Content-Length: 0\r\n' \
+            + b'\r\n'
+        request_len = 62
+        request_re = re.compile(r"^(index:).(\d+)", re.MULTILINE)
+
+        response = b'HTTP/1.1 200 OK\r\n' \
+            + b'content-length: 7\r\n' \
+            + b'\r\n' \
+            + b'index=%d'
+        response_len = 45
+        response_re = re.compile(r"(index=)(\d+)$", re.MULTILINE)
+
+        truncated_req = b'GET /client_pipeline_truncated HTTP/1.1\r\n' \
+            + b'Content-Length: 10000\r\n' \
+            + b'\r\n' \
+            + b'I like bunnies...'
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("", self.http_server11_port))
+            listener.settimeout(TIMEOUT)
+            listener.listen(1)
+            server, addr = listener.accept()
+            wait_http_listeners_up(self.EA1.addresses[0], l_filter={'name': 'L_testServer11'})
+
+            clients = []
+            for index in range(CLIENT_COUNT):
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                retry_exception(lambda cs=client:
+                                cs.connect(("localhost",
+                                            self.http_listener11_port)),
+                                delay=0.25,
+                                exception=ConnectionRefusedError)
+                client.settimeout(TIMEOUT)
+                clients.append(client)
+
+                if index in KILL_INDEX:
+                    # Pause before sending the incomplete request until the
+                    # previous deliveries arrive at the server. This prevents
+                    # the incomplete requests from arriving ahead of other
+                    # requests and having the server start reading the
+                    # incomplete request first (before the abort signal arrives
+                    # to cancel the request).
+                    self.assertTrue(retry(lambda: self._wait_server11_deliveries() == index))
+
+                    # Send an incomplete request. When the client closes this
+                    # should cause the client-facing router to abort the
+                    # in-flight delivery.
+                    client.sendall(truncated_req)
+                else:
+                    client.sendall(request % index)
+
+            # Wait for the client deliveries to arrive on the outgoing link to
+            # the server. The arrival order is not guaranteed! The test will
+            # validate that responses are sent to the proper client
+            self.assertTrue(retry(lambda: self._wait_server11_deliveries() == CLIENT_COUNT))
+
+            # Now destroy one of the clients. Wait until the socket has
+            # actually closed at the ingress router:
+
+            for index in KILL_INDEX:
+                clients[index].shutdown(socket.SHUT_RDWR)
+                clients[index].close()
+                clients[index] = None
+
+            # wait for the killed client connections to the router drop
+            self.assertTrue(retry(lambda: self._get_client11_count() == CLIENT_COUNT - len(KILL_INDEX)))
+            sleep(1.0)  # hack: ensure the abort signal has propagated to the server
+
+            # Since the cancelled request has yet to be written to the server
+            # connection by the adaptor, the adaptor should be smart enough to
+            # dispose of the cancelled request without writing anything to the
+            # server (or dropping the server connection)
+
+            for _ in range(CLIENT_COUNT - len(KILL_INDEX)):
+                data = _read_socket(server, request_len)
+                self.assertEqual(request_len, len(data))
+                index_match = request_re.search(data.decode())
+                self.assertIsNotNone(index_match,
+                                     f"request not matched >{data.decode()}<")
+                self.assertEqual(2, len(index_match.groups()))
+                server.sendall(response % int(index_match.group(2)))
+
+            # expect no more data from the router
+            server.settimeout(1.0)
+            self.assertRaises(TimeoutError, server.recv, 4096)
+            server.close()
+
+            # expect remaining clients get responses, and the correct responses
+            # are returned
+            for index in range(CLIENT_COUNT):
+                if clients[index] is not None:
+                    data = _read_socket(clients[index], response_len)
+                    self.assertEqual(response_len, len(data))
+                    index_match = response_re.search(data.decode())
+                    self.assertIsNotNone(index_match,
+                                         f"response not matched >{data.decode()}<")
+                    self.assertEqual(2, len(index_match.groups()))
+                    self.assertEqual(index, int(index_match.group(2)))
+                    clients[index].close()
 
 
 class FakeHttpServerBase:

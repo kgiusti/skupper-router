@@ -131,7 +131,7 @@ static void _server_response_msg_free(_server_request_t *req, _server_response_m
 static void _server_request_free(_server_request_t *hreq);
 static void _write_pending_request(_server_request_t *req);
 static void _cancel_request(_server_request_t *req);
-static bool _process_request(_server_request_t *req);
+static bool _process_requests(qdr_http1_connection_t *hconn);
 static void _encode_request_message(_server_request_t *hreq);
 static void _send_request_message(_server_request_t *hreq);
 
@@ -455,7 +455,8 @@ static void _do_reconnect(void *context)
         return;
     }
 
-    _process_request((_server_request_t*) DEQ_HEAD(hconn->requests));
+    // retire any completed/cancelled requests
+    _process_requests(hconn);
 
     // Do not attempt to re-connect if the current request is still in
     // progress. This happens when the server has closed the connection before
@@ -606,8 +607,9 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
         _server_request_t *hreq = (_server_request_t*) DEQ_HEAD(hconn->requests);
         if (_is_request_in_progress(hreq) && !hreq->response_complete)
             _cancel_request(hreq);
-        _process_request(hreq);
-        hreq = 0;  // _process_request *may* free hreq, do not trust this pointer!
+
+        // retire any completed/cancelled requests
+        _process_requests(hconn);
 
         //
         // Try to reconnect to the server. Leave the links intact so pending
@@ -720,10 +722,9 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
     }
 
     //
-    // After each event check connection and request status
+    // After each event check for completed/cancelled requests
     //
-    _server_request_t *hreq       = (_server_request_t *) DEQ_HEAD(hconn->requests);
-    bool               need_close = _process_request(hreq);
+    bool need_close = _process_requests(hconn);
     if (need_close) {
         qd_log(log, QD_LOG_DEBUG, "[C%"PRIu64"] HTTP Request requires connection close", hconn->conn_id);
         qdr_http1_close_connection(hconn, 0);
@@ -731,107 +732,123 @@ static void _handle_connection_events(pn_event_t *e, qd_server_t *qd_server, voi
 }
 
 
-// Check the head request for completion. Return true if the connection must be
-// closed before starting the next request.
-static bool _process_request(_server_request_t *hreq)
+// Check for completed/cancelled requests and retire them. Check if the connection needs to be closed before starting
+// the next request.
+//
+static bool _process_requests(qdr_http1_connection_t *hconn)
 {
-    bool need_close = false;
+    bool   need_close = false;
+    size_t retired_ct = 0;
 
-    if (!hreq)
-        return need_close;
+    _server_request_t *hreq = (_server_request_t *) DEQ_HEAD(hconn->requests);
+    while (hreq) {
+        if (hreq->cancelled) {
 
-    assert(DEQ_PREV(&hreq->base) == 0);  // preserve order!
+            // Dispose of cancelled requests
 
-    qdr_http1_connection_t *hconn = hreq->base.hconn;
+            if (hreq->request_dlv) {
+                if ((!hreq->request_acked || !hreq->request_settled) &&
+                    hconn->cfg.aggregation == QD_AGGREGATION_NONE) {
 
-    if (hreq->cancelled) {
+                    if (!hreq->request_dispo || hreq->request_dispo == PN_ACCEPTED)
+                        hreq->request_dispo = (hreq->base.out_http1_octets > 0
+                                               ? PN_MODIFIED : PN_RELEASED);
 
-        if (hreq->request_dlv) {
+                    qd_message_set_send_complete(qdr_delivery_message(hreq->request_dlv));
+                    qdr_link_complete_sent_message(qdr_http1_adaptor->core, hconn->out_link);
+                    qdr_delivery_remote_state_updated(qdr_http1_adaptor->core,
+                                                      hreq->request_dlv,
+                                                      hreq->request_dispo,
+                                                      true,   // settled
+                                                      0,      // delivery state
+                                                      false);
+                    hreq->request_acked = hreq->request_settled = true;
+                }
+            }
 
-            if ((!hreq->request_acked || !hreq->request_settled) &&
-                hconn->cfg.aggregation == QD_AGGREGATION_NONE) {
+            // drop in flight responses
+            _server_response_msg_t *rmsg = DEQ_HEAD(hreq->responses);
+            while (rmsg) {
+                if (rmsg->dlv) {
+                    qd_message_set_receive_complete(qdr_delivery_message(rmsg->dlv));
+                    qdr_delivery_set_aborted(rmsg->dlv);
+                    qdr_delivery_continue(qdr_http1_adaptor->core, rmsg->dlv, true);
+                }
+                _server_response_msg_free(hreq, rmsg);
+                rmsg = DEQ_HEAD(hreq->responses);
+            }
 
-                if (!hreq->request_dispo || hreq->request_dispo == PN_ACCEPTED)
-                    hreq->request_dispo = (hreq->base.out_http1_octets > 0
-                                           ? PN_MODIFIED : PN_RELEASED);
+            // it is safe to keep the connection up if this request has never been
+            // written to the connection, otherwise the state of the connection is
+            // unknown so close it
 
-                qd_message_set_send_complete(qdr_delivery_message(hreq->request_dlv));
-                qdr_link_complete_sent_message(qdr_http1_adaptor->core, hconn->out_link);
+            if (hreq->base.out_http1_octets > 0)
+                need_close = true;
+
+            qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE, "[C%"PRIu64"] HTTP request msg-id=%"PRIu64" cancelled",
+                   hconn->conn_id, hreq->base.msg_id);
+
+            retired_ct += 1;
+            _server_request_free(hreq);
+            if (hconn->out_link)
+                qdr_link_flow(qdr_http1_adaptor->core, hconn->out_link, 1, false);
+
+        } else if (hreq->codec_completed) {
+
+            // The request message has been fully encoded and the response msg(s)
+            // have been completely received.  The terminal disposition for the
+            // request message delivery can be set now since the server is done
+            // responding.  The request disposition can be settled after all the
+            // response messages have been delivered to the core.
+
+            // hreq->out_data.fifo ==> request message written to raw conn
+            // DEQ_IS_EMPTY(hreq->responses)
+            if ((!hreq->request_acked || (!hreq->request_settled
+                                          && DEQ_IS_EMPTY(hreq->responses)))
+                && hconn->cfg.aggregation == QD_AGGREGATION_NONE) {
+
+                assert(hreq->request_dlv);
+                assert(hreq->request_dispo == PN_ACCEPTED);
+                hreq->request_settled = DEQ_IS_EMPTY(hreq->responses);
+
+                if (!hreq->request_acked) {
+                    qd_message_set_send_complete(qdr_delivery_message(hreq->request_dlv));
+                    qdr_link_complete_sent_message(qdr_http1_adaptor->core, hconn->out_link);
+                }
                 qdr_delivery_remote_state_updated(qdr_http1_adaptor->core,
                                                   hreq->request_dlv,
                                                   hreq->request_dispo,
-                                                  true,   // settled
+                                                  hreq->request_settled,
                                                   0,      // delivery state
                                                   false);
-                hreq->request_acked = hreq->request_settled = true;
+                hreq->request_acked = true;
             }
-        }
 
-        // drop in flight responses
-        _server_response_msg_t *rmsg = DEQ_HEAD(hreq->responses);
-        while (rmsg) {
-            if (rmsg->dlv) {
-                qd_message_set_receive_complete(qdr_delivery_message(rmsg->dlv));
-                qdr_delivery_set_aborted(rmsg->dlv);
-                qdr_delivery_continue(qdr_http1_adaptor->core, rmsg->dlv, true);
+            if (hreq->request_acked && hreq->request_settled && DEQ_SIZE(hreq->out_data) == 0) {
+                qd_log(qdr_http1_adaptor->log, QD_LOG_DEBUG, "[C%"PRIu64"] HTTP request msg-id=%"PRIu64" completed!",
+                       hconn->conn_id, hreq->base.msg_id);
+
+                need_close = need_close || hreq->close_on_complete;
+                retired_ct += 1;
+                _server_request_free(hreq);
+                if (hconn->out_link)
+                    qdr_link_flow(qdr_http1_adaptor->core, hconn->out_link, 1, false);
+            } else {
+                // Current request not complete - stop processing
+                return need_close;
             }
-            _server_response_msg_free(hreq, rmsg);
-            rmsg = DEQ_HEAD(hreq->responses);
-        }
+        } else {
 
-        // it is safe to keep the connection up if this request has never been
-        // written to the connection, otherwise the state of the connection is
-        // unknown so close it
+            // head request not cancelled or completed - stop processing. Before returning check if this request has
+            // just been promoted to the head of the queue. In that case start sending it to the server.
 
-        if (hreq->base.out_http1_octets > 0)
-            need_close = true;
-
-        qd_log(qdr_http1_adaptor->log, QD_LOG_TRACE, "[C%"PRIu64"] HTTP request msg-id=%"PRIu64" cancelled",
-               hconn->conn_id, hreq->base.msg_id);
-        _server_request_free(hreq);
-
-        if (hconn->out_link)
-            qdr_link_flow(qdr_http1_adaptor->core, hconn->out_link, 1, false);
-
-    } else if (hreq->codec_completed) {
-
-        // The request message has been fully encoded and the response msg(s)
-        // have been completely received.  The terminal disposition for the
-        // request message delivery can be set now since the server is done
-        // responding.  The request disposition can be settled after all the
-        // response messages have been delivered to the core.
-
-        // hreq->out_data.fifo ==> request message written to raw conn
-        // DEQ_IS_EMPTY(hreq->responses)
-        if ((!hreq->request_acked || (!hreq->request_settled
-                                      && DEQ_IS_EMPTY(hreq->responses)))
-            && hconn->cfg.aggregation == QD_AGGREGATION_NONE) {
-
-            assert(hreq->request_dlv);
-            assert(hreq->request_dispo == PN_ACCEPTED);
-            hreq->request_settled = DEQ_IS_EMPTY(hreq->responses);
-
-            if (!hreq->request_acked) {
-                qd_message_set_send_complete(qdr_delivery_message(hreq->request_dlv));
-                qdr_link_complete_sent_message(qdr_http1_adaptor->core, hconn->out_link);
+            if (!need_close && retired_ct > 0) {
+                _send_request_message(hreq);
             }
-            qdr_delivery_remote_state_updated(qdr_http1_adaptor->core,
-                                              hreq->request_dlv,
-                                              hreq->request_dispo,
-                                              hreq->request_settled,
-                                              0,      // delivery state
-                                              false);
-            hreq->request_acked = true;
+            return need_close;
         }
 
-        if (hreq->request_acked && hreq->request_settled && DEQ_SIZE(hreq->out_data) == 0) {
-            qd_log(qdr_http1_adaptor->log, QD_LOG_DEBUG, "[C%"PRIu64"] HTTP request msg-id=%"PRIu64" completed!",
-                   hconn->conn_id, hreq->base.msg_id);
-            _server_request_free(hreq);
-
-            if (hconn->out_link)
-                qdr_link_flow(qdr_http1_adaptor->core, hconn->out_link, 1, false);
-        }
+        hreq = (_server_request_t *) DEQ_HEAD(hconn->requests);
     }
 
     return need_close;
@@ -1385,7 +1402,7 @@ static _server_request_t *_create_request_context(qdr_http1_connection_t *hconn,
 // Start a new request to the server.  msg has been validated to at least
 // application properties depth.  Returns 0 on success.
 //
-static uint64_t _send_request_headers(_server_request_t *hreq, qd_message_t *msg)
+static uint64_t _encode_request_headers(_server_request_t *hreq, qd_message_t *msg)
 {
     // start encoding HTTP request.  Need method, target and version
 
@@ -1534,7 +1551,7 @@ static void _encode_request_message(_server_request_t *hreq)
     qd_message_t                *msg = qdr_delivery_message(hreq->request_dlv);
 
     if (!hreq->headers_encoded) {
-        hreq->request_dispo = _send_request_headers(hreq, msg);
+        hreq->request_dispo = _encode_request_headers(hreq, msg);
         hreq->headers_encoded = true;
         if (hreq->request_dispo) {
             qd_log(qdr_http1_adaptor->log, QD_LOG_WARNING,
