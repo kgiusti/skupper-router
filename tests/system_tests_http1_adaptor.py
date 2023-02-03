@@ -48,7 +48,6 @@ from http1_tests import HttpAdaptorListenerConnectTestBase
 from http1_tests import HttpTlsBadConfigTestsBase
 
 
-@staticmethod
 def _read_socket(sock, length, timeout=TIMEOUT):
     """
     Read data from socket until either length octets are read or the socket
