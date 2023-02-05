@@ -58,13 +58,84 @@ void sys_rwlock_wrlock(sys_rwlock_t *lock);
 void sys_rwlock_rdlock(sys_rwlock_t *lock);
 void sys_rwlock_unlock(sys_rwlock_t *lock);
 
+typedef enum {
+    SYS_THREAD_MAIN,
+    SYS_THREAD_CORE,
+    SYS_THREAD_PROACTOR,
+    SYS_THREAD_VFLOW,
+    SYS_THREAD_LWS_HTTP,
+    // add new thread roles here and update _thread_names in threading.c
+    SYS_THREAD_ROLE_COUNT
+} sys_thread_role_t;
+
+// Proactor threads operate in different modes depending on the proactor event being handled by the thread. The proactor
+// makes certain thread-safety guarantees depending on the mode:
+//
+// - MODE_PROACTOR: A proactor-global event. Only one thread will be running in this mode. This thread runs currently
+//   with other threads which may be in MODE_IO and MODE_LISTENER. This mode is used to handle timer expiration, as well
+//   as other events not associated with proactor connections/listeners. Must not do proactor connection I/O or
+//   manipulate proactor listeners while in this mode.
+//
+// - MODE_IO: May run concurrently with other threads running in MODE_IO/TIMER/LISTENER. The thread can safely do I/O
+//   only on the connection associated with the event. Must not do I/O on other proactor connections. Must not
+//   manipulate proactor listeners or run timer handlers.
+//
+// - MODE_LISTENER: May run concurrently with other threads running in MODE_IO/TIMER/LISTENER. The
+//   thread can safely manipulate the listener associated with the event, including accepting/starting new
+//   connections. Must not do connection I/O or access any other listener instances or timer handlers.
+//
+// Note well: any proactor API calls that are explicitly marked as "thread-safe" CAN safely be used from any thread
+// regardless of mode.
+//
+typedef enum {
+    SYS_THREAD_MODE_NONE     = 0,  // non-proactor thread default mode
+    SYS_THREAD_MODE_PROACTOR = 0x01,
+    SYS_THREAD_MODE_IO       = 0x02,
+    SYS_THREAD_MODE_LISTENER = 0x04,
+
+    // syntactic sugar:
+    SYS_THREAD_MODE_TIMER = SYS_THREAD_MODE_PROACTOR,
+} sys_thread_mode_t;
 
 typedef struct sys_thread_t sys_thread_t;
 
-sys_thread_t *sys_thread(const char *thread_name, void *(*run_function) (void *), void *arg);
+sys_thread_t *sys_thread(sys_thread_role_t role, void *(*run_function)(void *), void *arg);
 void          sys_thread_free(sys_thread_t *thread);
 void          sys_thread_join(sys_thread_t *thread);
 sys_thread_t *sys_thread_self(void);
-const char   *sys_thread_name(sys_thread_t *thread);  // use self if thread == 0
 
-#endif
+// these functions will use the current thread if passed 0:
+sys_thread_role_t sys_thread_role(const sys_thread_t *);
+const char       *sys_thread_name(const sys_thread_t *thread);
+
+// these functions are only safe to operate on the current thread
+sys_thread_mode_t sys_thread_mode(void);
+sys_thread_mode_t sys_thread_set_mode(sys_thread_mode_t new_mode);  // returns previous mode
+
+#ifdef NDEBUG
+#define ASSERT_THREAD_IS(ROLE)
+#define ASSERT_THREAD_IS_NOT(ROLE)
+#define ASSERT_THREAD_MODE(MASK)
+#else
+#include <assert.h>
+#define ASSERT_THREAD_IS(ROLE)                \
+    do {                                      \
+        assert(sys_thread_role(0) == (ROLE)); \
+    } while (0)
+
+#define ASSERT_THREAD_IS_NOT(ROLE)            \
+    do {                                      \
+        assert(sys_thread_role(0) != (ROLE)); \
+    } while (0)
+
+#define ASSERT_THREAD_MODE(MASK)                \
+    do {                                        \
+        assert(!!(sys_thread_mode() & (MASK))); \
+    } while (0)
+#endif  // NDEBUG
+
+// for testing/debug only
+//
+char *test_threading_roles_names(void *context);
+
+#endif  // __sys_threading_h__

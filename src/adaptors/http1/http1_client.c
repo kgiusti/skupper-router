@@ -238,6 +238,8 @@ static void _on_tls_connection_secured(qd_tls_t *tls, void *context)
 //
 static void _handle_listener_accept(qd_adaptor_listener_t *adaptor_listener, pn_listener_t *pn_listener, void *context)
 {
+    ASSERT_THREAD_MODE(SYS_THREAD_MODE_LISTENER);
+
     qd_http_listener_t     *li    = (qd_http_listener_t *) context;
     qdr_http1_connection_t *hconn = _create_client_connection(li);
     assert(hconn);

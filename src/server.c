@@ -999,6 +999,7 @@ static bool handle(qd_server_t *qd_server, pn_event_t *e, pn_connection_t *pn_co
         return false;
 
     case PN_PROACTOR_TIMEOUT:
+        assert(sys_thread_mode() == SYS_THREAD_MODE_TIMER);
         qd_timer_visit();
         break;
 
@@ -1101,21 +1102,27 @@ static void *thread_run(void *arg)
     bool running = true;
     while (running) {
         pn_event_batch_t *events = pn_proactor_wait(qd_server->proactor);
-        pn_event_t * e;
+        pn_event_t       *e;
         qd_connection_t *qd_conn = 0;
         pn_connection_t *pn_conn = 0;
+        sys_thread_mode_t   mode = SYS_THREAD_MODE_PROACTOR;
+
+        // set the mode for the proactor thread
+        if ((pn_conn = pn_event_batch_connection(events)) != 0) {
+            // AMQP connection
+            qd_conn = (qd_connection_t *) pn_connection_get_context(pn_conn);
+            mode = SYS_THREAD_MODE_IO;
+        } else if (pn_event_batch_raw_connection(events)) {
+            mode = SYS_THREAD_MODE_IO;
+        } else if (pn_event_batch_listener(events)) {
+            mode = SYS_THREAD_MODE_LISTENER;
+        } else {
+            assert(pn_event_batch_proactor(events));
+        }
+        sys_thread_set_mode(mode);
 
         while (running && (e = pn_event_batch_next(events))) {
-            pn_connection_t *conn = pn_event_connection(e);
-
-            if (!pn_conn)
-                pn_conn = conn;
-            assert(pn_conn == conn);
-
-            if (!qd_conn)
-                qd_conn = !!pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : 0;
-
-            running = handle(qd_server, e, conn, qd_conn);
+            running = handle(qd_server, e, pn_conn, qd_conn);
 
             /* Free the connection after all other processing is complete */
             if (qd_conn && pn_event_type(e) == PN_TRANSPORT_CLOSED) {
@@ -1501,9 +1508,7 @@ void qd_server_run(qd_dispatch_t *qd)
     const int n = qd_server->thread_count;
     sys_thread_t **threads = (sys_thread_t **)qd_calloc(n, sizeof(sys_thread_t*));
     for (i = 0; i < n; i++) {
-        char thread_name[16];
-        snprintf(thread_name, sizeof(thread_name), "wrkr_%d", i);
-        threads[i] = sys_thread(thread_name, thread_run, qd_server);
+        threads[i] = sys_thread(SYS_THREAD_PROACTOR, thread_run, qd_server);
     }
 
     for (i = 0; i < n; i++) {

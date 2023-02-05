@@ -113,6 +113,8 @@ void qd_adaptor_common_init(void)
 
 int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn)
 {
+    ASSERT_THREAD_MODE(SYS_THREAD_MODE_IO);
+
     //
     // Define the allocation tiers.  The tier values are the number of read buffers to be granted
     // to raw connections based on the percentage of usage of the router-wide buffer ceiling.

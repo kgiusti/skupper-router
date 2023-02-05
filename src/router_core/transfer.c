@@ -155,6 +155,8 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
     bool              send_complete = false;
     int               num_deliveries_completed = 0;
 
+    ASSERT_THREAD_IS(SYS_THREAD_PROACTOR);
+
     if (link->link_direction == QD_OUTGOING) {
 
         // If a detach has been received on the link, there is no need to process deliveries on the link.
