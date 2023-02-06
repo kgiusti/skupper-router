@@ -36,7 +36,7 @@ struct qd_tls_domain_t {
     pn_tls_config_t *pn_tls_config;
     char            *ssl_profile_name;
     char            *host;
-    sys_mutex_t      lock;  // use lock to force memory barrier, else races!
+    sys_mutex_t      lock;       // use lock to force memory barrier, else races!
     long int         ref_count;  // locked by lock
     bool             is_listener;
 };
