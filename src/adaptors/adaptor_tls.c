@@ -32,11 +32,12 @@
 #define TLS_MAX_INPUT_CAPACITY 4
 
 struct qd_tls_domain_t {
-    sys_atomic_t     ref_count;
     qd_log_source_t *log_source;
     pn_tls_config_t *pn_tls_config;
     char            *ssl_profile_name;
     char            *host;
+    sys_mutex_t      lock;  // use lock to force memory barrier, else races!
+    long int         ref_count;  // locked by lock
     bool             is_listener;
 };
 
@@ -61,6 +62,7 @@ static void take_back_decrypt_input_buffs(qd_tls_t *tls);
 static void take_back_encrypt_input_buffs(qd_tls_t *tls);
 static void take_back_decrypt_output_buffs(qd_tls_t *tls);
 static void take_back_encrypt_output_buffs(qd_tls_t *tls);
+static void qd_tls_domain_incref(qd_tls_domain_t *tls_domain);
 
 void qd_tls_get_alpn_protocol(qd_tls_t *tls, char **alpn_protocol)
 {
@@ -89,7 +91,7 @@ qd_tls_t *qd_tls(qd_tls_domain_t *tls_domain, void *context, uint64_t conn_id, q
     tls->on_secure_cb = on_secure;
     tls->log_source   = tls_domain->log_source;
     tls->tls_domain   = tls_domain;
-    sys_atomic_inc(&tls_domain->ref_count);
+    qd_tls_domain_incref(tls_domain);
 
     tls->tls_session = pn_tls(tls_domain->pn_tls_config);
     if (!tls->tls_session) {
@@ -140,7 +142,10 @@ int qd_tls_set_alpn_protocols(qd_tls_domain_t *tls_domain, const char *alpn_prot
 {
     assert(alpn_protocol_count > 0);
     assert(tls_domain);
-    return pn_tls_config_set_alpn_protocols(tls_domain->pn_tls_config, alpn_protocols, alpn_protocol_count);
+    sys_mutex_lock(&tls_domain->lock);
+    int rc = pn_tls_config_set_alpn_protocols(tls_domain->pn_tls_config, alpn_protocols, alpn_protocol_count);
+    sys_mutex_unlock(&tls_domain->lock);
+    return rc;
 }
 
 qd_tls_domain_t *qd_tls_domain(const qd_adaptor_config_t *config,
@@ -154,7 +159,7 @@ qd_tls_domain_t *qd_tls_domain(const qd_adaptor_config_t *config,
 
     qd_tls_domain_t *tls_domain = new_qd_tls_domain_t();
     ZERO(tls_domain);
-    sys_atomic_init(&tls_domain->ref_count, 1);
+    tls_domain->ref_count        = 1;
     tls_domain->log_source       = log_source;
     tls_domain->is_listener      = is_listener;
     tls_domain->host             = qd_strdup(config->host);
@@ -301,6 +306,10 @@ qd_tls_domain_t *qd_tls_domain(const qd_adaptor_config_t *config,
             }
         }
 
+        // force a memory barrier to make the domain visible to all threads
+        sys_mutex_lock(&tls_domain->lock);
+        sys_mutex_unlock(&tls_domain->lock);
+
         qd_log(log_source,
                QD_LOG_INFO,
                "Adaptor %s %s successfully configured sslProfile %s",
@@ -317,17 +326,28 @@ qd_tls_domain_t *qd_tls_domain(const qd_adaptor_config_t *config,
     return 0;
 }
 
+static void qd_tls_domain_incref(qd_tls_domain_t *tls_domain)
+{
+    assert(tls_domain);
+    sys_mutex_lock(&tls_domain->lock);
+    assert(tls_domain->ref_count > 0);
+    tls_domain->ref_count++;
+    sys_mutex_unlock(&tls_domain->lock);
+}
+
 void qd_tls_domain_decref(qd_tls_domain_t *tls_domain)
 {
     if (tls_domain) {
-        uint32_t rc = sys_atomic_dec(&tls_domain->ref_count);
-        assert(rc != 0);
-        if (rc == 1) {
+        sys_mutex_lock(&tls_domain->lock);
+        assert(tls_domain->ref_count > 0);
+        long int count = --tls_domain->ref_count;
+        sys_mutex_unlock(&tls_domain->lock);
+        if (count == 0) {
             if (tls_domain->pn_tls_config)
                 pn_tls_config_free(tls_domain->pn_tls_config);
-            sys_atomic_destroy(&tls_domain->ref_count);
             free(tls_domain->host);
             free(tls_domain->ssl_profile_name);
+            sys_mutex_free(&tls_domain->lock);
             free_qd_tls_domain_t(tls_domain);
         }
     }
