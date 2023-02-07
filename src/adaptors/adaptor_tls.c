@@ -37,6 +37,7 @@ struct qd_tls_domain_t {
     pn_tls_config_t *pn_tls_config;
     char            *ssl_profile_name;
     char            *host;
+    sys_mutex_t      lock;  // lock domain during TLS processing
     bool             is_listener;
 };
 
@@ -155,6 +156,7 @@ qd_tls_domain_t *qd_tls_domain(const qd_adaptor_config_t *config,
     qd_tls_domain_t *tls_domain = new_qd_tls_domain_t();
     ZERO(tls_domain);
     sys_atomic_init(&tls_domain->ref_count, 1);
+    sys_mutex_init(&tls_domain->lock);
     tls_domain->log_source       = log_source;
     tls_domain->is_listener      = is_listener;
     tls_domain->host             = qd_strdup(config->host);
@@ -328,6 +330,7 @@ void qd_tls_domain_decref(qd_tls_domain_t *tls_domain)
             sys_atomic_destroy(&tls_domain->ref_count);
             free(tls_domain->host);
             free(tls_domain->ssl_profile_name);
+            sys_mutex_free(&tls_domain->lock);
             free_qd_tls_domain_t(tls_domain);
         }
     }
@@ -398,7 +401,10 @@ static bool process_tls(qd_tls_t *tls)
 {
     const bool check_if_secure = tls->on_secure_cb && !pn_tls_is_secure(tls->tls_session);
 
+    sys_mutex_lock(&tls->tls_domain->lock);
     int err = pn_tls_process(tls->tls_session);
+    sys_mutex_unlock(&tls->tls_domain->lock);
+
     if (err && !tls->tls_error) {
         tls->tls_error = true;
         // Stop all application data processing.
