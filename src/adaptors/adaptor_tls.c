@@ -418,7 +418,10 @@ static bool process_tls(qd_tls_t *tls)
 {
     const bool check_if_secure = tls->on_secure_cb && !pn_tls_is_secure(tls->tls_session);
 
+    sys_mutex_lock(&tls->tls_domain->lock);
     int err = pn_tls_process(tls->tls_session);
+    sys_mutex_unlock(&tls->tls_domain->lock);
+
     if (err && !tls->tls_error) {
         tls->tls_error = true;
         // Stop all application data processing.
