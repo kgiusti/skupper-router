@@ -72,7 +72,7 @@ jobs:
       RouterCMakeExtraArgs: >
         -DCMAKE_C_COMPILER_LAUNCHER=ccache
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG
+        -DCMAKE_C_FLAGS=-DQD_MEMORY_DEBUG -DLOG_FORWARDER_BALANCED
         -DUSE_BWRAP=ON
         -DRUNTIME_CHECK=${{matrix.runtimeCheck}}
         -DSANITIZE_PYTHON=OFF
