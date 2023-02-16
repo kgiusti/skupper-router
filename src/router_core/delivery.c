@@ -205,14 +205,41 @@ void qdr_delivery_remote_state_updated(qdr_core_t *core, qdr_delivery_t *deliver
 }
 
 
-qdr_delivery_t *qdr_delivery_continue(qdr_core_t *core,qdr_delivery_t *in_dlv, bool settled)
+qdr_delivery_t *qdr_delivery_continue(qdr_core_t *core, qdr_delivery_t *in_dlv, bool settled)
 {
+    qd_message_t *msg = qdr_delivery_message(in_dlv);
+    const bool more = !qd_message_receive_complete(msg);
 
+    if (more) {
+        //qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" Attempting cut-through for incoming dlv", DLV_ARGS(in_dlv));
+
+        // attempt to shortcut the intermediate continue updates directly to the peer if possible
+        qdr_delivery_t *peer = in_dlv->peer;
+        if (peer) { // single peer (not multicast)
+            qdr_link_t *peer_link = qdr_delivery_link(peer);
+            if (peer_link) {
+                bool activate = false;
+                sys_mutex_lock(&peer_link->conn->work_lock);
+                qdr_link_work_t *work = peer->link_work;
+                if (work->processing || work == DEQ_HEAD(peer_link->work_list)) {
+                    qdr_add_link_ref(&peer_link->conn->links_with_work[peer_link->priority], peer_link, QDR_LINK_LIST_CLASS_WORK);
+                    activate = true;
+                }
+                sys_mutex_unlock(&peer_link->conn->work_lock);
+                if (activate) {
+                    //qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" cut-through activation for outgoing delivery", DLV_ARGS(peer));
+                    peer_link->conn->protocol_adaptor->activate_handler(peer_link->conn->protocol_adaptor->user_context, peer_link->conn);
+                }
+                return in_dlv;
+            }
+        }
+        //qd_log(core->log, QD_LOG_DEBUG, DLV_FMT" cut-through failed, taking slow path", DLV_ARGS(in_dlv));
+    }
+
+    // cannot shortcut: send to core
     qdr_action_t   *action = qdr_action(qdr_delivery_continue_CT, "delivery_continue");
     action->args.delivery.delivery = in_dlv;
-
-    qd_message_t *msg = qdr_delivery_message(in_dlv);
-    action->args.delivery.more = !qd_message_receive_complete(msg);
+    action->args.delivery.more = more;
     action->args.delivery.presettled = settled;
 
     // This incref is for the action reference
