@@ -718,6 +718,7 @@ static qd_section_status_t message_section_check_LH(qd_message_content_t *conten
     // Check that the full section is present, if so advance the pointers to
     // consume the whole section.
     //
+    fixme();
     int pre_consume  = 1;  // Count the already extracted tag
     uint32_t consume = 0;
     unsigned char octet;
@@ -2432,6 +2433,100 @@ int qd_message_extend(qd_message_t *msg, qd_composed_field_t *field, bool *q2_bl
     return count;
 }
 
+// construct a new qd_message_stream_data_t for the given BODY/FOOTER section.
+//
+static qd_message_stream_data_t qd_message_stream_data(qd_message_private_t *msg,
+                                                       const qd_field_location_t *section_location,
+                                                       bool is_footer)
+{
+    qd_message_content_t *content = msg->content;
+
+    // ensure that the last stream data has completed before we attempt to get the next one
+    assert(DEQ_IS_EMPTY(msg->stream_data_list) ||
+           ((qd_message_stream_data_t *) DEQ_TAIL(msg->stream_data_list))->pending_octets == 0);
+
+    qd_message_stream_data_t *stream_data = new_qd_message_stream_data_t();
+    ZERO(stream_data);
+    stream_data->owning_message = msg;
+    stream_data->section        = *section_location;
+    stream_data->first_buffer   = section_location->buffer;
+    stream_data->is_footer      = is_footer;
+
+    // advance past the section data header and setup the payload location.
+
+    qd_buffer_t *buffer = section_location->buffer;
+    unsigned char *cursor = qd_buffer_base(buffer) + section_location->offset;
+
+    LOCK(&content->lock);
+
+    // It is expected that at least the section header and the data header are present.
+    bool good = advance(&cursor, &buffer, section_location->hdr_length);
+    void good;
+    assert(good);
+
+    // Cursor/buffer now point to the section data's tag octet. If the section is a footer the data section type needs
+    // to be preserved since it can by any type. Otherwise plow over it since it is vbin
+    size_t        vbin_hdr_len = 0;
+    unsigned char tag          = 0;
+    if (!is_footer) {
+        // coverity[check_return]
+        next_octet(&cursor, &buffer, &tag);
+        if (tag == QD_AMQP_VBIN8) {
+            advance(&cursor, &buffer, 1);
+            vbin_hdr_len += 1;
+        } else if (tag == QD_AMQP_VBIN32) {
+            advance(&cursor, &buffer, 4);
+            vbin_hdr_len += 4;
+        } else {
+            assert(false);  // uh, bug?
+        }
+    }
+
+    // coverity[check_return]
+    can_advance(&cursor, &buffer); // bump cursor to the next buffer if necessary
+
+    stream_data->payload.buffer     = buffer;
+    stream_data->payload.offset     = cursor - qd_buffer_base(buffer);
+    stream_data->payload.length     = location->length - vbin_hdr_len;
+    stream_data->payload.hdr_length = 0;
+    stream_data->payload.parsed     = true;
+    stream_data->payload.tag        = tag;
+
+    stream_data->pending_octets = stream_data->payload.length;
+
+    // now advance the cursor to the end of the payload, or the last buffer in the chain if the payload has not been
+    // completely received.
+
+    size_t offset = stream_data->payload.offset;
+    while (stream_data->pending_octets) {
+        size_t this_buf_size = qd_buffer_size(buffer) - offset;
+        offset = 0;
+        if (this_buf_size >= stream_data->pending_octets) {
+            cursor += stream_data->pending_octets;
+            stream_data->pending_octets = 0;
+        } else {
+            stream_data->pending_octets -= this_buf_size;
+            if (DEQ_NEXT(buffer)) {
+                buffer = DEQ_NEXT(buffer);
+                cursor = qd_buffer_base(buffer);
+            } else {
+                cursor = qd_buffer_cursor(buffer);
+                break;
+            }
+        }
+    }
+
+    UNLOCK(&content->lock);
+
+    stream_data->last_buffer = buffer;  // last buffer (so far!)
+    DEQ_INSERT_TAIL(msg->stream_data_list, stream_data);
+
+    // record where we left off
+    msg->body_buffer = buffer;
+    msg->body_cursor = cursor;
+
+    return stream_data;
+}
 
 /**
  * find_last_buffer_LH
@@ -2465,7 +2560,9 @@ static void find_last_buffer_LH(qd_field_location_t *location, unsigned char **c
     assert(false);  // The field should already have been validated as complete.
 }
 
-
+// Set the payload location for the given stream data. If remove_vbin_header is true the payload will NOT include the
+// VBIN tag or length fields (i.e. payload encompasses the binary data octets only).
+//
 void trim_stream_data_headers_LH(qd_message_stream_data_t *stream_data, bool remove_vbin_header)
 {
     const qd_field_location_t *location = &stream_data->section;
@@ -2694,48 +2791,116 @@ void qd_message_stream_data_release(qd_message_stream_data_t *stream_data)
 }
 
 
-qd_message_stream_data_result_t qd_message_next_stream_data(qd_message_t *in_msg, qd_message_stream_data_t **out_stream_data)
+// Invoked for the first body_data section. For $REASONS the first stream data must be fully received before it can be processed
+//
+static qd_message_stream_data_result_t _get_first_stream_data(qd_message_pvt_t *msg, qd_message_stream_data_t **out_stream_data)
 {
-    qd_message_pvt_t         *msg         = (qd_message_pvt_t*) in_msg;
-    qd_message_content_t     *content     = msg->content;
-    qd_message_stream_data_t *stream_data = 0;
+    qd_message_content_t      *content          = msg->content;
+    qd_message_stream_data_t  *stream_data      = 0;
+    bool                       is_footer        = false;
+    const qd_field_location_t *section_location = 0;
 
-    *out_stream_data = 0;
-    if (!msg->body_cursor) {
-        //
-        // We haven't returned a body-data record for this message yet.  Start
-        // by ensuring the message has been parsed up to the first body section
-        //
+    assert(!msg->body_cursor);
 
-        qd_message_depth_status_t status = qd_message_check_depth(in_msg, QD_DEPTH_BODY);
-        if (status == QD_MESSAGE_DEPTH_OK) {
-            // Even if DEPTH_OK, body is optional. If there is no body then move to
-            // the footer
-            if (msg->content->section_body.buffer) {
-                msg->body_buffer = msg->content->section_body.buffer;
-                msg->body_cursor = qd_buffer_base(msg->body_buffer) + msg->content->section_body.offset;
-            } else {
-                // No body. Look for footer
-                status = qd_message_check_depth(in_msg, QD_DEPTH_ALL);
-                if (status == QD_MESSAGE_DEPTH_OK) {
-                    if (msg->content->section_footer.buffer) {
-                        // footer is also optional
-                        msg->body_buffer = msg->content->section_footer.buffer;
-                        msg->body_cursor = qd_buffer_base(msg->body_buffer) + msg->content->section_footer.offset;
-                    }
+    //
+    // We haven't returned a body-data record for this message yet.  Start by ensuring the message has been parsed up to
+    // the first body section. If qd_message_check_depth() returns QD_MESSAGE_DEPTH_OK then the entire section (headers
+    // and all data) have been received and the stream data is complete.
+    //
+    qd_message_depth_status_t status = qd_message_check_depth(in_msg, QD_DEPTH_BODY);
+    if (status == QD_MESSAGE_DEPTH_OK) {
+        // Even if DEPTH_OK, body is optional. If there is no body then move to
+        // the footer.
+        if (msg->content->section_body.buffer) {
+            section_location = &msg->content->section_body;
+        } else {
+            // No body. Look for footer
+            status = qd_message_check_depth(in_msg, QD_DEPTH_ALL);
+            if (status == QD_MESSAGE_DEPTH_OK) {
+                // footer is also optional
+                if (msg->content->section_footer.buffer) {
+                    section_location = &msg->content->section_footer;
+                    is_footer = true;
                 }
             }
         }
-
-        if (status == QD_MESSAGE_DEPTH_INCOMPLETE)
-            return QD_MESSAGE_STREAM_DATA_INCOMPLETE;
-        if (status == QD_MESSAGE_DEPTH_INVALID)
-            return QD_MESSAGE_STREAM_DATA_INVALID;
-
-        // neither data not footer found
-        if (!msg->body_buffer)
-            return QD_MESSAGE_STREAM_DATA_NO_MORE;
+    } else if (status == QD_MESSAGE_DEPTH_INCOMPLETE) {
+        return QD_MESSAGE_STREAM_DATA_INCOMPLETE;
+    } else if (status == QD_MESSAGE_DEPTH_INVALID) {
+        return QD_MESSAGE_STREAM_DATA_INVALID;
+    } else {
+        // you added new status values, but didn't update this code!
+        // congratulations! Here's your free assert:
+        assert(false);
     }
+
+    if (!section_location) {
+        // Neither body or footer section, we're done
+        return QD_MESSAGE_STREAM_DATA_NO_MORE;
+    }
+
+    // section_location points to the first octet of the section header. This will be BODY_DATA_SHORT or FOOTER_SHORT pattern defined above.
+    // Create a new data_stream using the section that was just parsed out.
+
+    *out_stream_data = qd_message_stream_data(msg, &section_location, is_footer);
+    assert(*out_stream_data);
+    return is_footer ? QD_MESSAGE_STREAM_DATA_FOOTER_OK : QD_MESSAGE_STREAM_DATA_BODY_OK;
+}
+
+
+// The current stream_data is incomplete but more data may have arrived. Expand available stream data and possibly
+// complete it
+//
+static qd_message_stream_data_result_t _continue_stream_data(qd_message_stream_data_t *stream_data)
+{
+    assert(stream_data->pending_octets > 0);
+
+    qd_message_pvt_t     *msg     = stream_data->owning_message;
+    qd_message_content_t *content = msg->content;
+
+    assert(stream_data->last_buffer == msg->body_buffer);
+    unsigned char *cursor = msg->body_cursor;
+
+    LOCK(&content->lock);
+
+    while (stream_data->pending_octets && DEQ_NEXT(stream_data->last_buffer)) {
+        stream_data->last_buffer = DEQ_NEXT(stream_data->last_buffer);
+        size_t this_buf_size = qd_buffer_size(stream_data->last_buffer);
+        if (this_buf_size >= stream_data->pending_octets) {
+            cursor = qd_buffer_base(stream_data->last_buffer) + stream_data->pending_octets;
+            stream_data->pending_octets = 0;
+        } else {
+            stream_data->pending_octets -= this_buf_size;
+            cursor = qd_buffer_cursor(stream_data->last_buffer);
+        }
+    }
+
+    UNLOCK(&content->lock);
+
+    msg->body_buffer = stream_data->last_buffer;
+    msg->body_cursor = cursor;
+
+    return stream_data->is_footer ? QD_MESSAGE_STREAM_DATA_FOOTER_OK : QD_MESSAGE_STREAM_DATA_BODY_OK;
+}
+
+// Invoked for all subsequent body_data sections. For $REASONS if this next section is a FOOTER, it must be fully
+// received. Otherwise BODY_DATA sections may not be fully received (only the headers have arrived)
+//
+static qd_message_stream_data_result_t _get_next_stream_data(qd_message_t *in_msg, qd_message_stream_data_t **out_stream_data)
+{
+    qd_message_pvt_t     *msg     = (qd_message_pvt_t *) in_msg;
+    qd_message_content_t *content = msg->content;
+
+    assert(msg->body_cursor);
+
+#ifndef NDEBUG
+    // Expect there is not a current incomplete stream data
+    {
+        qd_message_stream_data_t *stream_data = (qd_message_stream_data_t *)DEQ_TAIL(msg->stream_data_list);
+        (void) stream_data;
+        assert(!stream_data || stream_data->pending_octets == 0);
+    }
+#endif
 
     // parse out the body data section, or the footer if we're past the
     // last data section
@@ -2794,6 +2959,32 @@ qd_message_stream_data_result_t qd_message_next_stream_data(qd_message_t *in_msg
 
     UNLOCK(&content->lock);
     return result;
+    
+
+    // find the location of the next body_data or footer section
+
+    // if footer wait until fully arrived
+
+    // create new stream data
+}
+
+qd_message_stream_data_result_t qd_message_next_stream_data(qd_message_t *in_msg, qd_message_stream_data_t **out_stream_data)
+{
+    qd_message_pvt_t *msg = (qd_message_pvt_t *) in_msg;
+
+    *out_stream_data = 0;
+
+    if (!msg->body_cursor) {
+        return _get_first_stream_data(msg, out_stream_data);
+    } else {
+        qd_message_stream_data_t *current = (qd_message_stream_data_t *)DEQ_TAIL(msg->stream_data_list);
+        if (current && current->pending_octets > 0) {
+            *out_stream_data = current;
+            return _continue_stream_data(*out_stream_data);
+        } else {
+            return _get_next_stream_data(msg, out_stream_data);
+        }
+    }
 }
 
 

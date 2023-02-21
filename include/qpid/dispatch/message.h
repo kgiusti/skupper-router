@@ -356,6 +356,20 @@ int qd_message_stream_data_buffer_count(const qd_message_stream_data_t *stream_d
  */
 int qd_message_stream_data_buffers(qd_message_stream_data_t *stream_data, pn_raw_buffer_t *buffers, int offset, int count);
 
+typedef enum {
+    QD_STREAM_DATA_BUFFER_OK,
+    QD_STREAM_DATA_BUFFER_INCOMPLETE,
+    QD_STREAM_DATA_BUFFER_NO_MORE,
+    QD_STREAD_DATA_BUFFER_INVALID,
+} this_name_sucks_t;
+this_name_sucks_t qd_message_stream_data_next_buffer(qd_message_stream_data_t *stream_data,
+                                                     qd_buffer_t **buffer,
+                                                     uint8_t *start, uint32_t *length);
+
+// true if entire vbin data is held in stream_data buffers. IOW the data associated with the stream_data has fully
+// arrived.
+bool qd_message_stream_data_is_complete(const qd_message_stream_data_t *stream_data);
+
 /**
  * qd_message_stream_data_payload_length
  *

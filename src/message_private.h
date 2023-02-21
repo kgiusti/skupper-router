@@ -54,20 +54,41 @@ typedef struct qd_message_pvt_t qd_message_pvt_t;
 typedef struct {
     qd_buffer_t *buffer;     // Buffer that contains the first octet of the field, null if the field is not present
     size_t       offset;     // Offset in the buffer to the first octet of the header
-    size_t       length;     // Length of the field or zero if unneeded
-    size_t       hdr_length; // Length of the field's header (not included in the length of the field)
+    size_t       hdr_length; // Length of the field's header
+    size_t       length;     // Length of the field's payload or zero if unneeded (does not include hdr_length)
     bool         parsed;     // True iff the buffer chain has been parsed to find this field
     uint8_t      tag;        // Type tag of the field
 } qd_field_location_t;
 
-
+// Streaming Message Payload Encoding
+//
+// The total length of a streaming message's payload is unknown until the end of the message arrives. The router must
+// not buffer the entire streaming message in order to determine the actual length of the payload. In order to support
+// message streaming the originating router encodes the message's payload as a series of explicitly sized chunks. Each
+// chunk is encoded as a Body Data section containing variable-length binary data (as defined in the AMQP 1.0
+// specification). Depending on the use-case the message may also contain a single trailer Footer Section. For example
+// the "on the wire" representation of a streaming message's payload would look like this:
+//
+// ... (<BODY DATA SECTION HEADER><VBIN(8|32)><..data octets..>)+ [<FOOTER SECTION HEADER><VBIN(8|32)><...data...>]
+//
+// A single body/footer chunk is represented by a qd_message_streaming_data_t. An API is provided for iterating over a
+// message's qd_message_stream_t elements in order.
+//
 struct qd_message_stream_data_t {
     DEQ_LINKS(qd_message_stream_data_t);  // Linkage to form a DEQ
     qd_message_pvt_t    *owning_message;  // Pointer to the owning message
     qd_field_location_t  section;         // Section descriptor for the field
     qd_field_location_t  payload;         // Descriptor for the payload of the body data
     qd_buffer_t         *first_buffer;    // for freeing, may be before section buffer!
-    qd_buffer_t         *last_buffer;     // Pointer to the last buffer in the field
+    qd_buffer_t         *last_buffer;     // Pointer to the current end of the data (may not be fully received)
+    //
+    size_t pending_octets;  // number of octets not yet received (0 if fully received)
+    bool   is_footer;
+    struct {
+        qd_buffer_t *buffer;  // current buffer (initially 0)
+        uint32_t     offset;  // to first octet of data
+        uint32_t     length;  // within buffer
+    } iterator;
 };
 
 ALLOC_DECLARE(qd_message_stream_data_t);
