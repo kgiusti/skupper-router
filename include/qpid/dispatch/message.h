@@ -330,6 +330,7 @@ int qd_message_extend(qd_message_t *msg, qd_composed_field_t *field, bool *q2_bl
 qd_iterator_t *qd_message_stream_data_iterator(const qd_message_stream_data_t *stream_data);
 
 
+#if 0
 /**
  * qd_message_stream_data_buffer_count
  *
@@ -339,6 +340,7 @@ qd_iterator_t *qd_message_stream_data_iterator(const qd_message_stream_data_t *s
  * @return Number of pn_raw_buffers needed to contain the entire content of this stream_data.
  */
 int qd_message_stream_data_buffer_count(const qd_message_stream_data_t *stream_data);
+#endif
 
 
 /**

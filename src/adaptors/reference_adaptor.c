@@ -268,7 +268,7 @@ static uint64_t qdr_ref_deliver(void *context, qdr_link_t *link, qdr_delivery_t 
                 //
                 // We have a new valid body-data segment.  Handle it
                 //
-                printf("qdr_ref_deliver: stream_data_buffer_count: %d\n", qd_message_stream_data_buffer_count(stream_data));
+                //printf("qdr_ref_deliver: stream_data_buffer_count: %d\n", qd_message_stream_data_buffer_count(stream_data));
 
                 qd_iterator_t *body_iter = qd_message_stream_data_iterator(stream_data);
                 char *body = (char*) qd_iterator_copy(body_iter);
