@@ -221,9 +221,11 @@ qdr_delivery_t *qdr_delivery_continue(qdr_core_t *core, qdr_delivery_t *in_dlv, 
                 bool activate = false;
                 sys_mutex_lock(&peer_link->conn->work_lock);
                 qdr_link_work_t *work = peer->link_work;
-                if (work->processing || work == DEQ_HEAD(peer_link->work_list)) {
-                    qdr_add_link_ref(&peer_link->conn->links_with_work[peer_link->priority], peer_link, QDR_LINK_LIST_CLASS_WORK);
-                    activate = true;
+                if (work) {
+                    if (work->processing || work == DEQ_HEAD(peer_link->work_list)) {
+                        qdr_add_link_ref(&peer_link->conn->links_with_work[peer_link->priority], peer_link, QDR_LINK_LIST_CLASS_WORK);
+                        activate = true;
+                    }
                 }
                 sys_mutex_unlock(&peer_link->conn->work_lock);
                 if (activate) {
