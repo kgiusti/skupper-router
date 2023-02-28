@@ -50,7 +50,7 @@ static char *qdr_generate_temp_addr(qdr_core_t *core)
 
     int rc;
     char *buffer = qd_malloc(len);
-    if (core->router_mode == QD_ROUTER_MODE_EDGE) {
+    if (qd_router_mode() == QD_ROUTER_MODE_EDGE) {
         rc = snprintf(buffer, len, edge_template, core->router_id, discriminator);
     } else {
         rc = snprintf(buffer, len, topo_template, core->router_area, core->router_id, discriminator);

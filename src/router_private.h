@@ -55,7 +55,6 @@ struct qd_router_t {
     qdr_core_t               *router_core;
     qd_tracemask_t           *tracemask;
     qd_log_source_t          *log_source;
-    qd_router_mode_t          router_mode;
     const char               *router_area;
     const char               *router_id;
     qd_node_t                *node;

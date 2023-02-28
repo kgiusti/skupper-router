@@ -681,7 +681,7 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     } else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_INTER_EDGE)) {
         link->link_type = QD_LINK_INTER_EDGE;
     } else if (qdr_terminus_has_capability(local_terminus, QD_CAPABILITY_EDGE_DOWNLINK)) {
-        if (conn->core->router_mode == QD_ROUTER_MODE_INTERIOR &&
+        if (qd_router_mode() == QD_ROUTER_MODE_INTERIOR &&
             conn->role == QDR_ROLE_EDGE_CONNECTION &&
             dir == QD_OUTGOING)
             link->link_type = QD_LINK_EDGE_DOWNLINK;

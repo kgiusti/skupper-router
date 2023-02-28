@@ -92,20 +92,6 @@ const char *qdr_router_columns[] =
      "workerThreads",
      0};
 
-
-static const char *qd_router_mode_names[] = {
-    "standalone",
-    "interior",
-    "edge",
-    "endpoint"
-};
-
-static const char *router_mode(qd_router_mode_t router_mode)
-{
-    return qd_router_mode_names[(int)router_mode];
-
-}
-
 static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_core_t *core)
 {
     switch(col) {
@@ -118,7 +104,7 @@ static void qdr_agent_write_column_CT(qd_composed_field_t *body, int col, qdr_co
         break;
 
     case QDR_ROUTER_MODE:
-        qd_compose_insert_string(body, router_mode(core->router_mode));
+        qd_compose_insert_string(body, qd_router_mode_name(qd_router_mode()));
         break;
 
     case QDR_ROUTER_AREA:

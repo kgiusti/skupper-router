@@ -225,7 +225,7 @@ void qdr_route_table_setup_CT(qdr_core_t *core)
     core->cost_epoch   = 1;
     core->addr_parse_tree = qd_parse_tree_new(QD_PARSE_TREE_ADDRESS);
 
-    if (core->router_mode == QD_ROUTER_MODE_INTERIOR) {
+    if (qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
         core->hello_addr      = qdr_add_local_address_CT(core, 'L', "qdhello",     QD_TREATMENT_MULTICAST_FLOOD);
         core->router_addr_L   = qdr_add_local_address_CT(core, 'L', "qdrouter",    QD_TREATMENT_MULTICAST_FLOOD);
         core->routerma_addr_L = qdr_add_local_address_CT(core, 'L', "qdrouter.ma", QD_TREATMENT_MULTICAST_ONCE);

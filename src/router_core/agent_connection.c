@@ -231,10 +231,10 @@ static void qdr_connection_insert_column_CT(qdr_core_t *core, qdr_connection_t *
 
     case QDR_CONNECTION_ACTIVE:
         if (conn->role == QDR_ROLE_EDGE_CONNECTION) {
-            if (core->router_mode == QD_ROUTER_MODE_INTERIOR) {
+            if (qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
                 qd_compose_insert_bool(body, true);
             }
-            else if (core->router_mode  == QD_ROUTER_MODE_EDGE){
+            else if (qd_router_mode()  == QD_ROUTER_MODE_EDGE){
                 if (core->active_edge_connection == conn)
                     qd_compose_insert_bool(body, true);
                 else
@@ -307,7 +307,7 @@ static void qdr_connection_insert_column_CT(qdr_core_t *core, qdr_connection_t *
     break;
 
     case QDR_CONNECTION_MESH_ID:
-        if (core->router_mode == QD_ROUTER_MODE_INTERIOR && conn->role == QDR_ROLE_EDGE_CONNECTION && conn->edge_mesh_id[0] != '\0') {
+        if (qd_router_mode() == QD_ROUTER_MODE_INTERIOR && conn->role == QDR_ROLE_EDGE_CONNECTION && conn->edge_mesh_id[0] != '\0') {
             qd_compose_insert_string_n(body, conn->edge_mesh_id, QD_DISCRIMINATOR_BYTES);
         } else {
             qd_compose_insert_null(body);

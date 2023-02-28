@@ -32,7 +32,7 @@ typedef struct {
 
 static bool qcm_edge_router_enable_CT(qdr_core_t *core)
 {
-    return core->router_mode == QD_ROUTER_MODE_EDGE;
+    return qd_router_mode() == QD_ROUTER_MODE_EDGE;
 }
 
 

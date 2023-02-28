@@ -191,7 +191,7 @@ static void on_conn_event(void             *context,
 
 static bool qcm_heartbeat_edge_enable_CT(qdr_core_t *core)
 {
-    return core->router_mode == QD_ROUTER_MODE_EDGE;
+    return qd_router_mode() == QD_ROUTER_MODE_EDGE;
 }
 
 

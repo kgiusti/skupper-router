@@ -318,11 +318,10 @@ static PyTypeObject RouterAdapterType = {
 
 static void qd_router_set_mobile_seq(void *context, int router_mask_bit, uint64_t mobile_seq)
 {
-    qd_router_t *router = (qd_router_t*) context;
     PyObject    *pArgs;
     PyObject    *pValue;
 
-    if (pySetMobileSeq && router->router_mode == QD_ROUTER_MODE_INTERIOR) {
+    if (pySetMobileSeq && qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
         qd_python_lock_state_t lock_state = qd_python_lock();
         pArgs = PyTuple_New(2);
         PyTuple_SetItem(pArgs, 0, PyLong_FromLong((long) router_mask_bit));
@@ -338,11 +337,10 @@ static void qd_router_set_mobile_seq(void *context, int router_mask_bit, uint64_
 
 static void qd_router_set_my_mobile_seq(void *context, uint64_t mobile_seq)
 {
-    qd_router_t *router = (qd_router_t*) context;
     PyObject    *pArgs;
     PyObject    *pValue;
 
-    if (pySetMobileSeq && router->router_mode == QD_ROUTER_MODE_INTERIOR) {
+    if (pySetMobileSeq && qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
         qd_python_lock_state_t lock_state = qd_python_lock();
         pArgs = PyTuple_New(1);
         PyTuple_SetItem(pArgs, 0, PyLong_FromLong((long) mobile_seq));
@@ -357,11 +355,10 @@ static void qd_router_set_my_mobile_seq(void *context, uint64_t mobile_seq)
 
 static void qd_router_link_lost(void *context, int link_mask_bit)
 {
-    qd_router_t *router = (qd_router_t*) context;
     PyObject    *pArgs;
     PyObject    *pValue;
 
-    if (pyLinkLost && router->router_mode == QD_ROUTER_MODE_INTERIOR) {
+    if (pyLinkLost && qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
         qd_python_lock_state_t lock_state = qd_python_lock();
         pArgs = PyTuple_New(1);
         PyTuple_SetItem(pArgs, 0, PyLong_FromLong((long) link_mask_bit));
@@ -389,7 +386,7 @@ qd_error_t qd_router_python_setup(qd_router_t *router)
     // If we are not operating as an interior router, don't start the
     // router module.
     //
-    if (router->router_mode != QD_ROUTER_MODE_INTERIOR)
+    if (qd_router_mode() != QD_ROUTER_MODE_INTERIOR)
         return QD_ERROR_NONE;
 
     PyObject *pDispatchModule = qd_python_module();
@@ -475,7 +472,7 @@ qd_error_t qd_pyrouter_tick(qd_router_t *router)
     PyObject *pArgs;
     PyObject *pValue;
 
-    if (pyTick && router->router_mode == QD_ROUTER_MODE_INTERIOR) {
+    if (pyTick && qd_router_mode() == QD_ROUTER_MODE_INTERIOR) {
         qd_python_lock_state_t lock_state = qd_python_lock();
         pArgs  = PyTuple_New(0);
         pValue = PyObject_CallObject(pyTick, pArgs);

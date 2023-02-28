@@ -980,7 +980,7 @@ static void qcm_mobile_sync_on_router_event_CT(void          *context,
 
 static bool qcm_mobile_sync_enable_CT(qdr_core_t *core)
 {
-    return core->router_mode == QD_ROUTER_MODE_INTERIOR;
+    return qd_router_mode() == QD_ROUTER_MODE_INTERIOR;
 }
 
 

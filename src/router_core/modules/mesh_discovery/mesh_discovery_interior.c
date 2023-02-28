@@ -101,7 +101,7 @@ static void on_transfer(void *link_context, qdr_delivery_t *delivery, qd_message
 
 static bool mesh_discovery_interior_enable_CT(qdr_core_t *core)
 {
-    return core->router_mode == QD_ROUTER_MODE_INTERIOR;
+    return qd_router_mode() == QD_ROUTER_MODE_INTERIOR;
 }
 
 

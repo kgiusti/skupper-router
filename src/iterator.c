@@ -505,6 +505,7 @@ void qd_iterator_set_address(bool _edge_mode, const char *area, const char *rout
 
 void qd_iterator_add_peer_edge(const char *router)
 {
+    assert(edge_mode);
     qd_iterator_peer_edge_t *peer_edge = NEW(qd_iterator_peer_edge_t);
     ZERO(peer_edge);
     peer_edge->router_id = strdup(router);
@@ -514,6 +515,7 @@ void qd_iterator_add_peer_edge(const char *router)
 
 void qd_iterator_del_peer_edge(const char *router)
 {
+    assert(edge_mode);
     qd_iterator_peer_edge_t *peer_edge = DEQ_HEAD(peer_edges);
 
     while (!!peer_edge) {

@@ -265,7 +265,7 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
     // the message needs to be annotated with this edge's mesh identifier.  This will be used
     // by the interior network to prevent the message from being looped back down to this mesh.
     //
-    if (core->router_mode == QD_ROUTER_MODE_EDGE
+    if (qd_router_mode() == QD_ROUTER_MODE_EDGE
         && out_link->conn->role == QDR_ROLE_EDGE_CONNECTION
         && core->edge_mesh_identifier[0] != '\0') {
         qd_message_set_ingress_mesh(out_dlv->msg, core->edge_mesh_identifier);

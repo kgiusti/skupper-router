@@ -395,7 +395,7 @@ static void on_link_event(void *context, qdrc_event_t event, qdr_link_t *link)
 
 static bool qdrc_edge_address_tracking_enable_CT(qdr_core_t *core)
 {
-    return core->router_mode == QD_ROUTER_MODE_INTERIOR;
+    return qd_router_mode() == QD_ROUTER_MODE_INTERIOR;
 }
 
 

@@ -72,13 +72,12 @@ static void qdr_core_setup_init(qdr_core_t *core)
     qdr_adaptors_init(core);
 }
 
-qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area, const char *id)
+qdr_core_t *qdr_core(qd_dispatch_t *qd, const char *area, const char *id)
 {
     qdr_core_t *core = NEW(qdr_core_t);
     ZERO(core);
 
     core->qd                  = qd;
-    core->router_mode         = mode;
     core->router_area         = area;
     core->router_id           = id;
     core->worker_thread_count = qd->thread_count;
@@ -749,7 +748,7 @@ void qdr_core_edge_mesh_id_changed_CT(qdr_core_t *core, qdr_connection_t *conn)
 
 void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link)
 {
-    assert(core->router_mode == QD_ROUTER_MODE_EDGE || !link->proxy);
+    assert(qd_router_mode() == QD_ROUTER_MODE_EDGE || !link->proxy);
     link->owning_addr = addr;
 
     //
@@ -815,7 +814,7 @@ void qdr_core_bind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_li
 
 void qdr_core_unbind_address_link_CT(qdr_core_t *core, qdr_address_t *addr, qdr_link_t *link)
 {
-    assert(core->router_mode == QD_ROUTER_MODE_EDGE || !link->proxy);
+    assert(qd_router_mode() == QD_ROUTER_MODE_EDGE || !link->proxy);
     link->owning_addr = 0;
 
     //

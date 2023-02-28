@@ -329,7 +329,7 @@ static qd_iterator_t *process_router_annotations(qd_router_t   *router,
                                                  int           *ingress_index)
 {
     qd_iterator_t *ingress_iter = 0;
-    bool           edge_mode    = router->router_mode == QD_ROUTER_MODE_EDGE;
+    bool           edge_mode    = qd_router_mode() == QD_ROUTER_MODE_EDGE;
 
     *link_exclusions = 0;
     *distance        = 0;
@@ -1606,7 +1606,7 @@ void qd_router_id_finalize(void)
 }
 
 
-qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area, const char *id)
+qd_router_t *qd_router(qd_dispatch_t *qd, const char *area, const char *id)
 {
     qd_container_register_node_type(qd, &router_node);
 
@@ -1621,7 +1621,6 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
     router->qd           = qd;
     router->router_core  = 0;
     router->log_source   = qd_log_source("ROUTER");
-    router->router_mode  = mode;
     router->router_area  = area;
     router->router_id    = id;
     router->node         = qd_container_set_default_node_type(qd, &router_node, (void*) router, QD_DIST_BOTH);
@@ -1635,13 +1634,13 @@ qd_router_t *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *are
     // Inform the field iterator module of this router's mode, id, and area.  The field iterator
     // uses this to offload some of the address-processing load from the router.
     //
+    qd_router_mode_t mode = qd_router_mode();
     qd_iterator_set_address(mode == QD_ROUTER_MODE_EDGE, area, id);
 
-    switch (router->router_mode) {
+    switch (mode) {
     case QD_ROUTER_MODE_STANDALONE: qd_log(router->log_source, QD_LOG_INFO, "Router started in Standalone mode");  break;
     case QD_ROUTER_MODE_INTERIOR:   qd_log(router->log_source, QD_LOG_INFO, "Router started in Interior mode, area=%s id=%s", area, id);  break;
     case QD_ROUTER_MODE_EDGE:       qd_log(router->log_source, QD_LOG_INFO, "Router started in Edge mode");  break;
-    case QD_ROUTER_MODE_ENDPOINT:   qd_log(router->log_source, QD_LOG_INFO, "Router started in Endpoint mode");  break;
     }
 
     qd_log(router->log_source, QD_LOG_INFO, "Version: %s", QPID_DISPATCH_VERSION);
@@ -1967,7 +1966,7 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
 
     unsigned int ra_flags = qdr_link_strip_annotations_out(link) ? QD_MESSAGE_RA_STRIP_ALL
         // edge routers do not propagate self in trace or ingress RA
-        : router->router_mode == QD_ROUTER_MODE_EDGE ? (QD_MESSAGE_RA_STRIP_INGRESS | QD_MESSAGE_RA_STRIP_TRACE)
+        : qd_router_mode() == QD_ROUTER_MODE_EDGE ? (QD_MESSAGE_RA_STRIP_INGRESS | QD_MESSAGE_RA_STRIP_TRACE)
         : QD_MESSAGE_RA_STRIP_NONE;
 
     qd_message_send(msg_out, qlink, ra_flags, &q3_stalled);
@@ -2103,7 +2102,7 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
 QD_EXPORT void qd_router_setup_late(qd_dispatch_t *qd)
 {
     qd->router->tracemask   = qd_tracemask();
-    qd->router->router_core = qdr_core(qd, qd->router->router_mode, qd->router->router_area, qd->router->router_id);
+    qd->router->router_core = qdr_core(qd, qd->router->router_area, qd->router->router_id);
 
     amqp_direct_adaptor = qdr_protocol_adaptor(qd->router->router_core,
                                                "amqp",

@@ -18,3 +18,10 @@
  */
 
 #include "qpid/dispatch/router.h"
+
+const char *qd_router_mode_names[] = {
+    "standalone",
+    "interior",
+    "edge",
+};
+ENUM_DEFINE(qd_router_mode, qd_router_mode_names);

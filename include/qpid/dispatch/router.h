@@ -46,6 +46,13 @@ typedef enum {
     QD_TREATMENT_UNAVAILABLE      = 4
 } qd_address_treatment_t;
 
+typedef enum {
+    QD_ROUTER_MODE_STANDALONE,  ///< Standalone router.  No routing protocol participation
+    QD_ROUTER_MODE_INTERIOR,    ///< Interior router.  Full participation in routing protocol.
+    QD_ROUTER_MODE_EDGE,        ///< Edge router.  No transit-router capability.
+} qd_router_mode_t;
+ENUM_DECLARE(qd_router_mode);
+
 #include "qpid/dispatch/router_core.h"
 
 /** Message forwarding descriptor
@@ -140,6 +147,9 @@ qd_router_forwarder_t *qd_router_get_forwarder(qd_address_treatment_t t);
 
 /** Retrieve the routers current memory usage (in bytes) */
 uint64_t qd_router_memory_usage(void);
+
+/** Retrieve the operational mode of the router */
+qd_router_mode_t qd_router_mode(void);
 
 ///@}
 

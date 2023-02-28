@@ -52,7 +52,7 @@ qd_container_t *qd_container(qd_dispatch_t *qd);
 void            qd_container_free(qd_container_t *container);
 qd_policy_t    *qd_policy(qd_dispatch_t *qd);
 void            qd_policy_free(qd_policy_t *policy);
-qd_router_t    *qd_router(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area, const char *id);
+qd_router_t    *qd_router(qd_dispatch_t *qd, const char *area, const char *id);
 void            qd_router_setup_late(qd_dispatch_t *qd);
 void            qd_router_free(qd_router_t *router);
 void            qd_error_initialize(void);
@@ -64,6 +64,13 @@ const char     *CLOSEST_DISTRIBUTION   = "closest";
 const char     *MULTICAST_DISTRIBUTION = "multicast";
 const char     *BALANCED_DISTRIBUTION  = "balanced";
 const char     *UNAVAILABLE_DISTRIBUTION = "unavailable";
+
+static qd_router_mode_t _router_mode;
+
+qd_router_mode_t qd_router_mode(void)
+{
+    return _router_mode;
+}
 
 sys_atomic_t global_delivery_id;
 
@@ -105,9 +112,8 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir, bool test_hooks)
 
     qd_dispatch_set_router_area(qd, strdup("0"));
     qd_dispatch_set_router_id(qd, strdup("0"));
-    qd->router_mode = QD_ROUTER_MODE_ENDPOINT;
-    qd->default_treatment   = QD_TREATMENT_ANYCAST_BALANCED;
-    qd->test_hooks          = test_hooks;
+    qd->default_treatment = QD_TREATMENT_ANYCAST_BALANCED;
+    qd->test_hooks        = test_hooks;
 
     qd_python_initialize(qd, python_pkgdir);
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
@@ -195,18 +201,13 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
 {
     qd_dispatch_set_router_default_distribution(qd, qd_entity_opt_string(entity, "defaultDistribution", 0)); QD_ERROR_RET();
     qd_dispatch_set_router_id(qd, qd_entity_opt_string(entity, "id", 0)); QD_ERROR_RET();
-    qd->router_mode = qd_entity_get_long(entity, "mode"); QD_ERROR_RET();
+    _router_mode = qd_entity_get_long(entity, "mode"); QD_ERROR_RET();
     if (!qd->router_id) {
-        char *mode = 0;
-        switch (qd->router_mode) {
-        case QD_ROUTER_MODE_STANDALONE: mode = "Standalone_"; break;
-        case QD_ROUTER_MODE_INTERIOR:   mode = "Interior_";   break;
-        case QD_ROUTER_MODE_EDGE:       mode = "Edge_";       break;
-        case QD_ROUTER_MODE_ENDPOINT:   mode = "Endpoint_";   break;
-        }
-        
+        const char *mode = qd_router_mode_name(_router_mode);
         qd->router_id = (char*) malloc(strlen(mode) + QD_DISCRIMINATOR_SIZE + 2);
         strcpy(qd->router_id, mode);
+        qd->router_id[0] = (char) toupper(qd->router_id[0]);
+        strcat(qd->router_id, "_");
         qd_generate_discriminator(qd->router_id + strlen(qd->router_id));
     }
 
@@ -314,7 +315,7 @@ qd_error_t qd_dispatch_prepare(qd_dispatch_t *qd)
     qd_log_global_options(qd->timestamp_format, qd->timestamps_in_utc);
     qd->server             = qd_server(qd, qd->thread_count, qd->router_id, qd->sasl_config_path, qd->sasl_config_name);
     qd->container          = qd_container(qd);
-    qd->router             = qd_router(qd, qd->router_mode, qd->router_area, qd->router_id);
+    qd->router             = qd_router(qd, qd->router_area, qd->router_id);
     qd->connection_manager = qd_connection_manager(qd);
     qd->policy             = qd_policy(qd);
     return qd_error_code();

@@ -25,19 +25,11 @@
 
 const char *QD_ROUTER_TYPE = "router";
 
-static const char *qd_router_mode_names[] = {
-    "standalone",
-    "interior",
-    "edge",
-    "endpoint"
-};
-ENUM_DEFINE(qd_router_mode, qd_router_mode_names);
-
 QD_EXPORT qd_error_t qd_entity_refresh_router(qd_entity_t* entity, void *impl) {
     qd_dispatch_t *qd = (qd_dispatch_t*) impl;
     qd_router_t *router = qd->router;
     if (qd_entity_set_string(entity, "area", router->router_area) == 0 &&
-        qd_entity_set_string(entity, "mode", qd_router_mode_name(router->router_mode)) == 0 &&
+        qd_entity_set_string(entity, "mode", qd_router_mode_name(qd_router_mode())) == 0 &&
         qd_entity_set_long(entity, "addrCount", 0) == 0 &&
         qd_entity_set_long(entity, "linkCount", 0) == 0 &&
         qd_entity_set_long(entity, "nodeCount", 0) == 0
