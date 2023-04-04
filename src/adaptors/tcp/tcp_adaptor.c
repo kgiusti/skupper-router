@@ -251,7 +251,13 @@ static void grant_read_buffers(qdr_tcp_connection_t *conn, const char *msg)
 {
     if (IS_ATOMIC_FLAG_SET(&conn->raw_closed_read) || read_window_full(conn))
         return;
-    int granted_read_buffers = qd_raw_connection_grant_read_buffers(conn->pn_raw_conn);
+    int granted_read_buffers = 0;
+    if (conn->require_tls) {
+        // TODO(kgiusti): use qd_buffer_t for TLS at some point
+        qd_raw_connection_grant_read_buffers(conn->pn_raw_conn);
+    } else {
+        qd_raw_connection_grant_read_qd_buffers(conn->pn_raw_conn);
+    }
     qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG,
            "[C%" PRIu64 "] grant_read_buffers(%s) granted %i read buffers to proton raw api", conn->conn_id, msg,
            granted_read_buffers);
@@ -356,25 +362,31 @@ static int handle_incoming_raw_read(qdr_tcp_connection_t *conn, qd_buffer_list_t
         //
         pn_raw_buffer_t raw_buffers[RAW_BUFFER_BATCH];
         size_t          n;
-        while ((n = pn_raw_connection_take_read_buffers(conn->pn_raw_conn, raw_buffers, RAW_BUFFER_BATCH))) {
-            for (size_t i = 0; i < n && raw_buffers[i].bytes; ++i) {
-                qd_adaptor_buffer_t *buf           = (qd_adaptor_buffer_t *) raw_buffers[i].context;
-                uint32_t             raw_buff_size = raw_buffers[i].size;
+        while ((n = pn_raw_connection_take_read_buffers(conn->pn_raw_conn, raw_buffers, RAW_BUFFER_BATCH)) > 0) {
+            for (size_t i = 0; i < n; ++i) {
+                qd_buffer_t *buf = (qd_buffer_t *) raw_buffers[i].context;
+                assert(buf);
+
+                uint32_t raw_buff_size = raw_buffers[i].size;
                 if (raw_buff_size > 0) {
+                    assert(qd_buffer_size(buf) == 0);
+                    assert(raw_buffers[i].offset == 0);
+
                     result += raw_buff_size;
+                    qd_buffer_insert(buf, raw_buff_size);
                     qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG,
                            "[C%" PRIu64 "] pn_raw_connection_take_read_buffers() took buffer with %u bytes",
                            conn->conn_id, raw_buff_size);
                     if (buffers)
-                        qd_buffer_list_append(buffers, (uint8_t *) (raw_buffers[i].bytes + raw_buffers[i].offset),
-                                              raw_buffers[i].size);
+                        DEQ_INSERT_TAIL(*buffers, buf);
+                    else
+                        qd_buffer_free(buf);
                 }
                 else {
                     qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG,
                            "[C%" PRIu64 "] pn_raw_connection_take_read_buffers() took buffer with 0 bytes", conn->conn_id);
+                    qd_buffer_free(buf);
                 }
-                // Free the wire buffer that we got back from proton.
-                qd_adaptor_buffer_free(buf);
             }
         }
     }
@@ -1106,7 +1118,21 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
         }
         // If somehow the PN_RAW_CONNECTION_CLOSED_WRITE and the PN_RAW_CONNECTION_CLOSED_READ events did not come by,
         // we will drain the buffers here just as a backup.
-        int drained_buffers = qd_raw_connection_drain_read_write_buffers(conn->pn_raw_conn);
+
+        int drained_buffers = qd_raw_connection_drain_write_buffers(conn->pn_raw_conn);
+        if (conn->require_tls) {
+            drained_buffers += qd_raw_connection_drain_read_buffers(conn->pn_raw_conn);
+        } else {
+            pn_raw_buffer_t raw_buffer;
+            while (pn_raw_connection_take_read_buffers(conn->pn_raw_conn, &raw_buffer, 1) == 1) {
+                qd_buffer_t *buf = (qd_buffer_t *) raw_buffer.context;
+                assert(buf);
+                qd_buffer_free(buf);
+            }
+        }
+
+
+        
         qd_log(log, QD_LOG_INFO, "[C%" PRIu64 "] PN_RAW_CONNECTION_DISCONNECTED %s, drained_buffers=%i", conn->conn_id,
                qdr_tcp_connection_role_name(conn), drained_buffers);
 
@@ -1160,7 +1186,19 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
     }
     case PN_RAW_CONNECTION_DRAIN_BUFFERS: {
         pn_raw_connection_t *pn_raw_conn     = pn_event_raw_connection(e);
-        int                  drained_buffers = qd_raw_connection_drain_read_write_buffers(pn_raw_conn);
+
+        int drained_buffers = qd_raw_connection_drain_write_buffers(pn_raw_conn);
+        if (conn->require_tls) {
+            drained_buffers += qd_raw_connection_drain_read_buffers(pn_raw_conn);
+        } else {
+            pn_raw_buffer_t raw_buffer;
+            while (pn_raw_connection_take_read_buffers(conn->pn_raw_conn, &raw_buffer, 1) == 1) {
+                qd_buffer_t *buf = (qd_buffer_t *) raw_buffer.context;
+                assert(buf);
+                qd_buffer_free(buf);
+            }
+        }
+
         qd_log(log, QD_LOG_DEBUG, "[C%" PRIu64 "] PN_RAW_CONNECTION_DRAIN_BUFFERS Drained a total of %i buffers",
                conn->conn_id, drained_buffers);
     } break;

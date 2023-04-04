@@ -74,6 +74,7 @@ void qd_free_adaptor_config(qd_adaptor_config_t *config);
  * @param raw_conn - The pn_raw_connection_t to which read buffers are granted.
  */
 int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn);
+int qd_raw_connection_grant_read_qd_buffers(pn_raw_connection_t *pn_raw_conn);
 
 /**
  * Writes as many adaptor buffers as allowed by pn_raw_connection_write_buffers_capacity().

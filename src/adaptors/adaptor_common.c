@@ -96,6 +96,31 @@ int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn)
     return granted;
 }
 
+int qd_raw_connection_grant_read_qd_buffers(pn_raw_connection_t *pn_raw_conn)
+{
+    assert(pn_raw_conn);
+    pn_raw_buffer_t raw_buffers[RAW_BUFFER_BATCH];
+    size_t          desired = pn_raw_connection_read_buffers_capacity(pn_raw_conn);
+    const size_t    granted = desired;
+
+    while (desired) {
+        int i;
+        for (i = 0; i < desired && i < RAW_BUFFER_BATCH; ++i) {
+            qd_buffer_t *buf = qd_buffer();
+            raw_buffers[i].bytes    = (char *) qd_buffer_base(buf);
+            raw_buffers[i].capacity = qd_buffer_capacity(buf);
+            raw_buffers[i].size     = 0;
+            raw_buffers[i].offset   = 0;
+            raw_buffers[i].context  = (uintptr_t) buf;
+        }
+        desired -= i;
+        pn_raw_connection_give_read_buffers(pn_raw_conn, raw_buffers, i);
+    }
+
+    return granted;
+}
+
+
 int qd_raw_connection_write_buffers(pn_raw_connection_t *pn_raw_conn, qd_adaptor_buffer_list_t *blist)
 {
     if (!pn_raw_conn)
