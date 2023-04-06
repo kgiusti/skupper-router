@@ -168,6 +168,26 @@ static void qdr_tcp_connection_ingress_accept(qdr_tcp_connection_t *tc);
 static void handle_outgoing(qdr_tcp_connection_t *conn);
 static void encrypt_outgoing_tls(qdr_tcp_connection_t *conn, qd_adaptor_buffer_t *unencrypted_buff, bool write_buffers);
 
+
+
+static int _raw_connection_drain_write_qd_buffers(pn_raw_connection_t *pn_raw_conn)
+{
+    pn_raw_buffer_t buffs[RAW_BUFFER_BATCH];
+    size_t          n;
+    int             write_buffers_drained = 0;
+    while ((n = pn_raw_connection_take_written_buffers(pn_raw_conn, buffs, RAW_BUFFER_BATCH))) {
+        for (size_t i = 0; i < n; ++i) {
+            write_buffers_drained++;
+            if (buffs[i].context) {
+                qd_message_stream_data_t *msd = (qd_message_stream_data_t *) buffs[i].context;
+                qd_message_stream_data_release_up_to(msd);
+            }
+        }
+    }
+    return write_buffers_drained;
+}
+
+
 // is the incoming byte window full
 //
 inline static bool read_window_full(const qdr_tcp_connection_t* conn)
@@ -761,10 +781,16 @@ static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg, pn_r
         assert(conn->outgoing_body_bytes <= conn->outgoing_stream_data->payload.length);
 
         if (conn->outgoing_body_bytes == conn->outgoing_stream_data->payload.length) {
-            // Erase the stream_data struct from the connection so that
-            // a new one gets created on the next pass.
-            conn->previous_stream_data = conn->outgoing_stream_data;
+            // KAG: set last buffer context to point back to owning outgoing_stream_data
+            buffers[used - 1].context = (uintptr_t) conn->outgoing_stream_data;
+
+            if (conn->require_tls) {
+                // Erase the stream_data struct from the connection so that
+                // a new one gets created on the next pass.
+                conn->previous_stream_data = conn->outgoing_stream_data;
+            }
             conn->outgoing_stream_data = 0;
+
         } else {
             // Returned buffer set did not consume the entire stream_data segment.
             // Leave existing stream_data struct in place for use on next pass.
@@ -788,7 +814,14 @@ static bool copy_outgoing_buffs(qdr_tcp_connection_t *conn)
         qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG,
                "[C%" PRIu64 "] No outgoing buffers to copy at present, returning true", conn->conn_id);
         return true;
-    } else if (DEQ_SIZE(conn->out_buffs) == pn_buffs_capacity) {
+    }
+
+    // KAG
+    if (!conn->require_tls) {
+        return false;
+    }
+
+    if (DEQ_SIZE(conn->out_buffs) == pn_buffs_capacity) {
         //
         // Cannot continue reading body datas because the proton raw buffer write capacity has been reached.
         //
@@ -876,8 +909,27 @@ static void handle_outgoing(qdr_tcp_connection_t *conn)
                 break;
             }
         }
+
         assert(!IS_ATOMIC_FLAG_SET(&conn->raw_closed_write));
-        int num_buffers_written = qd_raw_connection_write_buffers(conn->pn_raw_conn, &conn->out_buffs);
+        int num_buffers_written = 0;
+        if (conn->require_tls) {
+            num_buffers_written = qd_raw_connection_write_buffers(conn->pn_raw_conn, &conn->out_buffs);
+        } else {
+            int max_buffs = pn_raw_connection_write_buffers_capacity(conn->pn_raw_conn);
+            max_buffs = MIN(max_buffs, conn->outgoing_buff_count - conn->outgoing_buff_idx);
+            if (max_buffs > 0) {
+                num_buffers_written += max_buffs;
+                pn_raw_connection_write_buffers(conn->pn_raw_conn,
+                                                &conn->outgoing_buffs[conn->outgoing_buff_idx],
+                                                max_buffs);
+                conn->outgoing_buff_idx += max_buffs;
+            }
+            if (conn->outgoing_buff_idx == conn->outgoing_buff_count) {
+                conn->outgoing_buff_count = 0;
+                conn->outgoing_buff_idx   = 0;
+            }
+        }
+
         qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG, "[C%" PRIu64 "] handle_outgoing() num_buffers_written=%i",
                conn->conn_id, num_buffers_written);
         if (conn->read_eos_seen) {
@@ -1032,6 +1084,7 @@ static void encrypt_outgoing_tls(qdr_tcp_connection_t *conn, qd_adaptor_buffer_t
     }
     if (write_buffers && DEQ_SIZE(conn->out_buffs) > 0) {
         assert(!IS_ATOMIC_FLAG_SET(&conn->raw_closed_write));
+        assert(conn->require_tls);
         int num_buffers_written = qd_raw_connection_write_buffers(conn->pn_raw_conn, &conn->out_buffs);
         qd_log(tcp_adaptor->log_source, QD_LOG_DEBUG, "[C%" PRIu64 "] encrypt_outgoing_tls() num_buffers_written=%i",
                conn->conn_id, num_buffers_written);
@@ -1098,7 +1151,12 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
     }
     case PN_RAW_CONNECTION_CLOSED_WRITE: {
         SET_ATOMIC_FLAG(&conn->raw_closed_write);
-        int num_drained_write_buffers = qd_raw_connection_drain_write_buffers(conn->pn_raw_conn);
+        int num_drained_write_buffers = 0;
+        if (conn->require_tls) {
+            num_drained_write_buffers = qd_raw_connection_drain_write_buffers(conn->pn_raw_conn);
+        } else {
+            num_drained_write_buffers = _raw_connection_drain_write_qd_buffers(conn->pn_raw_conn);
+        }
         qd_log(log, QD_LOG_DEBUG, "[C%" PRIu64 "] PN_RAW_CONNECTION_CLOSED_WRITE %s, drained %i write buffers",
                conn->conn_id, qdr_tcp_connection_role_name(conn), num_drained_write_buffers);
         break;
@@ -1119,16 +1177,19 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
         // If somehow the PN_RAW_CONNECTION_CLOSED_WRITE and the PN_RAW_CONNECTION_CLOSED_READ events did not come by,
         // we will drain the buffers here just as a backup.
 
-        int drained_buffers = qd_raw_connection_drain_write_buffers(conn->pn_raw_conn);
+        int drained_buffers = 0;
         if (conn->require_tls) {
             drained_buffers += qd_raw_connection_drain_read_buffers(conn->pn_raw_conn);
+            drained_buffers += qd_raw_connection_drain_write_buffers(conn->pn_raw_conn);
         } else {
             pn_raw_buffer_t raw_buffer;
             while (pn_raw_connection_take_read_buffers(conn->pn_raw_conn, &raw_buffer, 1) == 1) {
                 qd_buffer_t *buf = (qd_buffer_t *) raw_buffer.context;
                 assert(buf);
                 qd_buffer_free(buf);
+                drained_buffers += 1;
             }
+            drained_buffers += _raw_connection_drain_write_qd_buffers(conn->pn_raw_conn);
         }
 
 
@@ -1222,12 +1283,25 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
         pn_raw_buffer_t buffs[RAW_BUFFER_BATCH];
         size_t          written = 0;
         size_t          n;
-        while ((n = pn_raw_connection_take_written_buffers(conn->pn_raw_conn, buffs, RAW_BUFFER_BATCH))) {
-            for (size_t i = 0; i < n; ++i) {
-                written += buffs[i].size;
-                qd_adaptor_buffer_t *qd_adaptor_buffer = (qd_adaptor_buffer_t *) buffs[i].context;
-                assert(qd_adaptor_buffer);
-                qd_adaptor_buffer_free(qd_adaptor_buffer);
+
+        if (conn->require_tls) {
+            while ((n = pn_raw_connection_take_written_buffers(conn->pn_raw_conn, buffs, RAW_BUFFER_BATCH))) {
+                for (size_t i = 0; i < n; ++i) {
+                    written += buffs[i].size;
+                    qd_adaptor_buffer_t *qd_adaptor_buffer = (qd_adaptor_buffer_t *) buffs[i].context;
+                    assert(qd_adaptor_buffer);
+                    qd_adaptor_buffer_free(qd_adaptor_buffer);
+                }
+            }
+        } else {
+            while ((n = pn_raw_connection_take_written_buffers(conn->pn_raw_conn, buffs, RAW_BUFFER_BATCH))) {
+                for (size_t i = 0; i < n; ++i) {
+                    written += buffs[i].size;
+                    if (buffs[i].context) {
+                        qd_message_stream_data_t *msd = (qd_message_stream_data_t *) buffs[i].context;
+                        qd_message_stream_data_release_up_to(msd);
+                    }
+                }
             }
         }
 
