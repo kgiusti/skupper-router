@@ -33,7 +33,8 @@ typedef struct qd_buffer_t qd_buffer_t;
 
 DEQ_DECLARE(qd_buffer_t, qd_buffer_list_t);
 
-#define QD_BUFFER_DEFAULT_SIZE (4096 - sizeof(qd_buffer_t))
+//#define QD_BUFFER_DEFAULT_SIZE (4096 - sizeof(qd_buffer_t))
+#define QD_BUFFER_DEFAULT_SIZE (16384 - sizeof(qd_buffer_t))
 extern size_t QD_BUFFER_SIZE;
 
 /** A raw byte buffer .*/
