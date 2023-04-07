@@ -732,10 +732,10 @@ static void handle_disconnected(qdr_tcp_connection_t* conn)
     qdr_del_tcp_connection(conn);
 }
 
-static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg, pn_raw_buffer_t *buffers, int count)
+#if 0
+//, pn_raw_buffer_t *buffers, int count)
+static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg)
 {
-    int used = 0;
-
     // Advance to next stream_data vbin segment if necessary.
     // Return early if no data to process or error
     if (conn->outgoing_stream_data == 0) {
@@ -770,19 +770,25 @@ static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg, pn_r
 
     // A valid stream_data is in place.
     // Try to get a buffer set from it.
-    used = qd_message_stream_data_buffers(conn->outgoing_stream_data, buffers, conn->outgoing_body_offset, count);
+
+    int free_slots = WRITE_BUFFERS - conn->outgoing_buff_count;
+    if (free_slots == 0) return 0;
+
+    const int used = qd_message_stream_data_buffers(conn->outgoing_stream_data, &conn->outgoing_buffs[conn->outgoing_buff_count], conn->outgoing_body_offset, free_slots);
     if (used > 0) {
+
         // Accumulate the lengths of the returned buffers.
         for (int i=0; i<used; i++) {
-            conn->outgoing_body_bytes += buffers[i].size;
+            conn->outgoing_body_bytes += conn->outgoing_buffs[conn->outgoing_buff_count + i].size;
         }
+        conn->outgoing_buff_count += used;
 
         // Buffers returned should never exceed the stream_data payload length
         assert(conn->outgoing_body_bytes <= conn->outgoing_stream_data->payload.length);
 
         if (conn->outgoing_body_bytes == conn->outgoing_stream_data->payload.length) {
             // KAG: set last buffer context to point back to owning outgoing_stream_data
-            buffers[used - 1].context = (uintptr_t) conn->outgoing_stream_data;
+            conn->outgoing_buffs[conn->outgoing_buff_count - 1].context = (uintptr_t) conn->outgoing_stream_data;
 
             if (conn->require_tls) {
                 // Erase the stream_data struct from the connection so that
@@ -803,9 +809,99 @@ static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg, pn_r
     }
     return used;
 }
+#else
+
+static int read_message_body(qdr_tcp_connection_t *conn, qd_message_t *msg)
+{
+    //fprintf(stdout, "%lu read_message_body start\n", conn->conn_id);
+    int buf_count = 0;
+    while (true) {
+        // Advance to next stream_data vbin segment if necessary.
+        // Return early if no data to process or error
+        if (conn->outgoing_stream_data == 0) {
+            qd_message_stream_data_result_t stream_data_result = qd_message_next_stream_data(msg, &conn->outgoing_stream_data);
+            if (stream_data_result == QD_MESSAGE_STREAM_DATA_BODY_OK) {
+                //fprintf(stdout, " %lu new stream data\n", conn->conn_id);
+                // a new stream_data segment has been found
+                conn->outgoing_body_bytes  = 0;
+                conn->outgoing_body_offset = 0;
+                // continue to process this segment
+            } else if (stream_data_result == QD_MESSAGE_STREAM_DATA_INCOMPLETE) {
+                //fprintf(stdout, "%lu read_message_body done\n", conn->conn_id);
+                return buf_count;
+            } else {
+                switch (stream_data_result) {
+                    case QD_MESSAGE_STREAM_DATA_NO_MORE:
+                    case QD_MESSAGE_STREAM_DATA_ABORTED:
+                        // treat aborted like end-of-stream since both require closing the connection.
+                        qd_log(tcp_adaptor->log_source, QD_LOG_INFO,
+                               "[C%"PRIu64"] EOS", conn->conn_id);
+                        conn->read_eos_seen = true;
+                        break;
+                    case QD_MESSAGE_STREAM_DATA_INVALID:
+                        buf_count = -1;
+                        qd_log(tcp_adaptor->log_source, QD_LOG_ERROR,
+                               "[C%"PRIu64"] Invalid body data for streaming message", conn->conn_id);
+                        break;
+                    default:
+                        break;
+                }
+                qd_message_set_send_complete(msg);
+                //fprintf(stdout, "%lu read_message_body done\n", conn->conn_id);
+                return buf_count;
+            }
+        }
+
+        // A valid stream_data is in place.
+        // Try to get a buffer set from it.
+
+        int free_slots = WRITE_BUFFERS - conn->outgoing_buff_count;
+        if (free_slots == 0) {
+            //fprintf(stdout, "%lu read_message_body done\n", conn->conn_id);
+            return buf_count;
+        }
+
+        const int used = qd_message_stream_data_buffers(conn->outgoing_stream_data, &conn->outgoing_buffs[conn->outgoing_buff_count], conn->outgoing_body_offset, free_slots);
+        assert(used >= 0);  // kag what if received 0 len vbin???
+
+        // Accumulate the lengths of the returned buffers.
+        for (int i = 0; i < used; i++) {
+            conn->outgoing_body_bytes += conn->outgoing_buffs[conn->outgoing_buff_count + i].size;
+        }
+        conn->outgoing_buff_count += used;
+
+        // Buffers returned should never exceed the stream_data payload length
+        assert(conn->outgoing_body_bytes <= conn->outgoing_stream_data->payload.length);
+
+        if (conn->outgoing_body_bytes == conn->outgoing_stream_data->payload.length) {
+            // KAG: set last buffer context to point back to owning outgoing_stream_data
+            conn->outgoing_buffs[conn->outgoing_buff_count - 1].context = (uintptr_t) conn->outgoing_stream_data;
+
+            if (conn->require_tls) {
+                // Erase the stream_data struct from the connection so that
+                // a new one gets created on the next pass.
+                conn->previous_stream_data = conn->outgoing_stream_data;
+            }
+            //fprintf(stdout, " %lu stream data read done\n", conn->conn_id);
+            conn->outgoing_stream_data = 0;
+        } else {
+            // Returned buffer set did not consume the entire stream_data segment.
+            // Leave existing stream_data struct in place for use on next pass.
+            // Add the number of returned buffers to the offset for the next pass.
+            conn->outgoing_body_offset += used;
+            assert(free_slots == used);  // guess: filled outgoing_buffs
+            break;
+        }
+    }
+
+    //fprintf(stdout, "%lu read_message_body done\n", conn->conn_id);
+    return buf_count;
+}
 
 
-static bool copy_outgoing_buffs(qdr_tcp_connection_t *conn)
+#endif
+
+/*static*/ bool copy_outgoing_buffs(qdr_tcp_connection_t *conn)
 {
     // Send the outgoing buffs to pn_raw_conn.
     size_t pn_buffs_capacity = pn_raw_connection_write_buffers_capacity(conn->pn_raw_conn);
@@ -818,7 +914,7 @@ static bool copy_outgoing_buffs(qdr_tcp_connection_t *conn)
 
     // KAG
     if (!conn->require_tls) {
-        return false;
+        return conn->outgoing_buff_count < WRITE_BUFFERS;
     }
 
     if (DEQ_SIZE(conn->out_buffs) == pn_buffs_capacity) {
@@ -892,38 +988,31 @@ static void handle_outgoing(qdr_tcp_connection_t *conn)
             return;
         }
         qd_message_t *msg = qdr_delivery_message(conn->out_dlv_stream);
-        bool read_more_body = true;
+        if (!msg) return;
 
-        if (conn->outgoing_buff_count > 0) {
-            // flush outgoing buffs that hold body data waiting to go out
-            read_more_body = copy_outgoing_buffs(conn);
-        }
-        while (read_more_body) {
-            conn->outgoing_buff_idx   = 0;
-            conn->outgoing_buff_count = read_message_body(conn, msg, conn->outgoing_buffs, WRITE_BUFFERS);
-            if (conn->outgoing_buff_count > 0) {
-                // Send the data just returned
-                read_more_body = copy_outgoing_buffs(conn);
-            } else {
-                // The incoming stream has no new data to send
+        assert(!conn->require_tls);  // not supported yet
+        assert(!IS_ATOMIC_FLAG_SET(&conn->raw_closed_write));
+
+        int num_buffers_written = 0;
+        while (true) {
+            read_message_body(conn, msg);
+            int buf_count = conn->outgoing_buff_count - conn->outgoing_buff_idx;
+            //fprintf(stdout, "%lu Data buffers: %d\n", conn->conn_id, buf_count);
+            int max_buffs = pn_raw_connection_write_buffers_capacity(conn->pn_raw_conn);
+            //fprintf(stdout, "%lu available slots: %d\n", conn->conn_id, max_buffs);
+
+            buf_count = MIN(max_buffs, buf_count);
+            if (buf_count < 1) {
                 break;
             }
-        }
 
-        assert(!IS_ATOMIC_FLAG_SET(&conn->raw_closed_write));
-        int num_buffers_written = 0;
-        if (conn->require_tls) {
-            num_buffers_written = qd_raw_connection_write_buffers(conn->pn_raw_conn, &conn->out_buffs);
-        } else {
-            int max_buffs = pn_raw_connection_write_buffers_capacity(conn->pn_raw_conn);
-            max_buffs = MIN(max_buffs, conn->outgoing_buff_count - conn->outgoing_buff_idx);
-            if (max_buffs > 0) {
-                num_buffers_written += max_buffs;
-                pn_raw_connection_write_buffers(conn->pn_raw_conn,
-                                                &conn->outgoing_buffs[conn->outgoing_buff_idx],
-                                                max_buffs);
-                conn->outgoing_buff_idx += max_buffs;
-            }
+            num_buffers_written += buf_count;
+            pn_raw_connection_write_buffers(conn->pn_raw_conn,
+                                            &conn->outgoing_buffs[conn->outgoing_buff_idx],
+                                            buf_count);
+            conn->outgoing_buff_idx += buf_count;
+            //fprintf(stdout, "%lu wrote bufs: %d\n", conn->conn_id, buf_count);
+
             if (conn->outgoing_buff_idx == conn->outgoing_buff_count) {
                 conn->outgoing_buff_count = 0;
                 conn->outgoing_buff_idx   = 0;
