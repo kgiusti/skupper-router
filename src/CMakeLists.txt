@@ -137,6 +137,7 @@ set(qpid_dispatch_SOURCES
   trace_mask.c
   python_utils.c
   qd_asan_interface.c
+  eventing/eventing.c
   )
 
 set(qpid_dispatch_INCLUDES

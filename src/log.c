@@ -32,6 +32,7 @@
 #include "qpid/dispatch/ctools.h"
 #include "qpid/dispatch/dispatch.h"
 #include "qpid/dispatch/threading.h"
+#include "qpid/dispatch/eventing.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -350,6 +351,10 @@ static void write_log(qd_log_source_t *log_source, qd_log_entry_t *entry)
         int syslog_level = level->syslog;
         if (syslog_level != -1)
             syslog(syslog_level, "%s", log_str);
+    }
+
+    if (!!(level->bit & levels[WARNING].mask)) {
+        qd_event_str(log_str);
     }
 }
 
