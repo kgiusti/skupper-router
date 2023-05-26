@@ -29,6 +29,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+// syntactic sugar: avoid littering the code with #ifdef NDEBUG preprocessor checks:
+// if (SK_DEBUG) { ... blocks will be removed by the compiler in release builds
+//
+#ifdef NDEBUG
+#define SK_DEBUG 0
+#else
+#define SK_DEBUG 1
+#endif
+
 // Convert parameter X into a C constant string.
 // Use SK_STRINGIFY(): the two-level define allows the *value* of a macro parameter
 // to be expressed as a string, example:
@@ -40,16 +49,17 @@
 #define SK_STRINGIFY(X)            _sk_stringify_internal_(X)
 
 // Ensure condition C is true. Crash the router via abort() if C is false.
-// Note well: the code this macro generates is present in *release builds*, unlike the C assert() macro.
-// Also: this macro is NOT Async Signal safe! Do not call it from a signal(7) handler!
+// Note well: the abort() code this macro generates is present in *release builds*, unlike the C assert() macro.
 //
-#define SK_CHECK(C)                                                                             \
-    do {                                                                                        \
-        if (!(C)) {                                                                             \
-            fprintf(stderr, "Error! '%s' failed %s:%d\n", SK_STRINGIFY(C), __FILE__, __LINE__); \
-            fflush(stderr);                                                                     \
-            abort();                                                                            \
-        }                                                                                       \
+#define SK_CHECK(C)                                                                                 \
+    do {                                                                                            \
+        if (!(C)) {                                                                                 \
+            if (SK_DEBUG) {                                                                         \
+                fprintf(stderr, "Error! '%s' failed %s:%d\n", SK_STRINGIFY(C), __FILE__, __LINE__); \
+                fflush(stderr);                                                                     \
+            }                                                                                       \
+            abort();                                                                                \
+        }                                                                                           \
     } while (0)
 
 #define NEW(t)             (t*)  qd_malloc(sizeof(t))
