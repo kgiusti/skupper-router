@@ -29,7 +29,28 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CT_ASSERT(exp) { assert(exp); }
+// Convert parameter X into a C constant string.
+// Use SK_STRINGIFY(): the two-level define allows the *value* of a macro parameter
+// to be expressed as a string, example:
+//
+// #define XYZ 7
+// SK_STRINGIFY(XYZ) => "7", not "XYZ"
+//
+#define _sk_stringify_internal_(X) #X
+#define SK_STRINGIFY(X)            _sk_stringify_internal_(X)
+
+// Ensure condition C is true. Crash the router via abort() if C is false.
+// Note well: the code this macro generates is present in *release builds*, unlike the C assert() macro.
+// Also: this macro is NOT Async Signal safe! Do not call it from a signal(7) handler!
+//
+#define SK_CHECK(C)                                                                             \
+    do {                                                                                        \
+        if (!(C)) {                                                                             \
+            fprintf(stderr, "Error! '%s' failed %s:%d\n", SK_STRINGIFY(C), __FILE__, __LINE__); \
+            fflush(stderr);                                                                     \
+            abort();                                                                            \
+        }                                                                                       \
+    } while (0)
 
 #define NEW(t)             (t*)  qd_malloc(sizeof(t))
 #define NEW_ARRAY(t,n)     (t*)  qd_malloc(sizeof(t)*(n))
@@ -86,112 +107,114 @@ do { \
 #define DEQ_FIND_N(n,ptr,test) while((ptr) && !(test)) ptr = DEQ_NEXT_N(n,ptr);
 #define DEQ_FIND(ptr,test) DEQ_FIND_N(,ptr,test)
 
-#define DEQ_INSERT_HEAD_N(n,d,i)  \
-do {                              \
-    CT_ASSERT((i)->next##n == 0); \
-    CT_ASSERT((i)->prev##n == 0); \
-    if ((d).head) {               \
-        (i)->next##n = (d).head;  \
-        (d).head->prev##n = i;    \
-    } else {                      \
-        (d).tail = i;             \
-        (i)->next##n = 0;         \
-        CT_ASSERT((d).size == 0); \
-    }                             \
-    (i)->prev##n = 0;             \
-    (d).head = i;                 \
-    (d).size++;                   \
-} while (0)
+#define DEQ_INSERT_HEAD_N(n, d, i)        \
+    do {                                  \
+        SK_CHECK((i)->next##n == 0);      \
+        SK_CHECK((i)->prev##n == 0);      \
+        if ((d).head) {                   \
+            (i)->next##n      = (d).head; \
+            (d).head->prev##n = i;        \
+        } else {                          \
+            (d).tail     = i;             \
+            (i)->next##n = 0;             \
+            SK_CHECK((d).size == 0);      \
+        }                                 \
+        (i)->prev##n = 0;                 \
+        (d).head     = i;                 \
+        (d).size++;                       \
+    } while (0)
 #define DEQ_INSERT_HEAD(d,i) DEQ_INSERT_HEAD_N(,d,i)
 
-#define DEQ_INSERT_TAIL_N(n,d,i)  \
-do {                              \
-    CT_ASSERT((i)->next##n == 0); \
-    CT_ASSERT((i)->prev##n == 0); \
-    if ((d).tail) {               \
-        (i)->prev##n = (d).tail;  \
-        (d).tail->next##n = i;    \
-    } else {                      \
-        (d).head = i;             \
-        (i)->prev##n = 0;         \
-        CT_ASSERT((d).size == 0); \
-    }                             \
-    (i)->next##n = 0;             \
-    (d).tail = i;                 \
-    (d).size++;                   \
-} while (0)
+#define DEQ_INSERT_TAIL_N(n, d, i)        \
+    do {                                  \
+        SK_CHECK((i)->next##n == 0);      \
+        SK_CHECK((i)->prev##n == 0);      \
+        if ((d).tail) {                   \
+            (i)->prev##n      = (d).tail; \
+            (d).tail->next##n = i;        \
+        } else {                          \
+            (d).head     = i;             \
+            (i)->prev##n = 0;             \
+            SK_CHECK((d).size == 0);      \
+        }                                 \
+        (i)->next##n = 0;                 \
+        (d).tail     = i;                 \
+        (d).size++;                       \
+    } while (0)
 #define DEQ_INSERT_TAIL(d,i) DEQ_INSERT_TAIL_N(,d,i)
 
-#define DEQ_REMOVE_HEAD_N(n,d)    \
-do {                              \
-    __typeof__((d).head) scratch; \
-    CT_ASSERT((d).head);          \
-    if ((d).head) {               \
-        scratch = (d).head;   \
-        (d).head = (d).head->next##n;  \
-        if ((d).head == 0) {      \
-            (d).tail = 0;         \
-            CT_ASSERT((d).size == 1); \
-        } else                     \
-            (d).head->prev##n = 0; \
-        (d).size--;                \
-        scratch->next##n = 0;  \
-        scratch->prev##n = 0;  \
-    }                              \
-} while (0)
+#define DEQ_REMOVE_HEAD_N(n, d)           \
+    do {                                  \
+        __typeof__((d).head) scratch;     \
+        SK_CHECK((d).head);               \
+        if ((d).head) {                   \
+            scratch  = (d).head;          \
+            (d).head = (d).head->next##n; \
+            if ((d).head == 0) {          \
+                (d).tail = 0;             \
+                SK_CHECK((d).size == 1);  \
+            } else                        \
+                (d).head->prev##n = 0;    \
+            SK_CHECK((d).size > 0);       \
+            (d).size--;                   \
+            scratch->next##n = 0;         \
+            scratch->prev##n = 0;         \
+        }                                 \
+    } while (0)
 #define DEQ_REMOVE_HEAD(d)  DEQ_REMOVE_HEAD_N(,d)
 
-#define DEQ_REMOVE_TAIL_N(n,d)  \
-do {                            \
-    __typeof__((d).head) scratch;   \
-    CT_ASSERT((d).tail);        \
-    if ((d).tail) {             \
-        scratch = (d).tail; \
-        (d).tail = (d).tail->prev##n;  \
-        if ((d).tail == 0) {    \
-            (d).head = 0;       \
-            CT_ASSERT((d).size == 1); \
-        } else                  \
-            (d).tail->next##n = 0; \
-        (d).size--;             \
-        scratch->next##n = 0;  \
-        scratch->prev##n = 0;  \
-    }                           \
-} while (0)
+#define DEQ_REMOVE_TAIL_N(n, d)           \
+    do {                                  \
+        __typeof__((d).head) scratch;     \
+        SK_CHECK((d).tail);               \
+        if ((d).tail) {                   \
+            scratch  = (d).tail;          \
+            (d).tail = (d).tail->prev##n; \
+            if ((d).tail == 0) {          \
+                (d).head = 0;             \
+                SK_CHECK((d).size == 1);  \
+            } else                        \
+                (d).tail->next##n = 0;    \
+            SK_CHECK((d).size > 0);       \
+            (d).size--;                   \
+            scratch->next##n = 0;         \
+            scratch->prev##n = 0;         \
+        }                                 \
+    } while (0)
 #define DEQ_REMOVE_TAIL(d) DEQ_REMOVE_TAIL_N(,d)
 
-#define DEQ_INSERT_AFTER_N(n,d,i,a) \
-do {                                \
-    CT_ASSERT((i)->next##n == 0);   \
-    CT_ASSERT((i)->prev##n == 0);   \
-    CT_ASSERT(a);                   \
-    if ((a)->next##n)               \
-        (a)->next##n->prev##n = (i);  \
-    else                            \
-        (d).tail = (i);             \
-    (i)->next##n = (a)->next##n;    \
-    (i)->prev##n = (a);             \
-    (a)->next##n = (i);             \
-    (d).size++;                     \
-} while (0)
+#define DEQ_INSERT_AFTER_N(n, d, i, a)   \
+    do {                                 \
+        SK_CHECK((i)->next##n == 0);     \
+        SK_CHECK((i)->prev##n == 0);     \
+        SK_CHECK(a);                     \
+        if ((a)->next##n)                \
+            (a)->next##n->prev##n = (i); \
+        else                             \
+            (d).tail = (i);              \
+        (i)->next##n = (a)->next##n;     \
+        (i)->prev##n = (a);              \
+        (a)->next##n = (i);              \
+        (d).size++;                      \
+    } while (0)
 #define DEQ_INSERT_AFTER(d,i,a) DEQ_INSERT_AFTER_N(,d,i,a)
 
-#define DEQ_REMOVE_N(n,d,i)                    \
-do {                                           \
-    if ((i)->next##n)                          \
-        (i)->next##n->prev##n = (i)->prev##n;  \
-    else                                       \
-        (d).tail = (i)->prev##n;               \
-    if ((i)->prev##n)                          \
-        (i)->prev##n->next##n = (i)->next##n;  \
-    else                                       \
-        (d).head = (i)->next##n;               \
-    CT_ASSERT((d).size > 0);                   \
-    (d).size--;                                \
-    (i)->next##n = 0;                          \
-    (i)->prev##n = 0;                          \
-    CT_ASSERT((d).size || (!(d).head && !(d).tail)); \
-} while (0)
+#define DEQ_REMOVE_N(n, d, i)                           \
+    do {                                                \
+        if ((i)->next##n)                               \
+            (i)->next##n->prev##n = (i)->prev##n;       \
+        else                                            \
+            (d).tail = (i)->prev##n;                    \
+        if ((i)->prev##n)                               \
+            (i)->prev##n->next##n = (i)->next##n;       \
+        else                                            \
+            (d).head = (i)->next##n;                    \
+        SK_CHECK((d).size > 0);                         \
+        (d).size--;                                     \
+        (i)->next##n = 0;                               \
+        (i)->prev##n = 0;                               \
+        SK_CHECK((d).size || (!(d).head && !(d).tail)); \
+    } while (0)
 #define DEQ_REMOVE(d,i) DEQ_REMOVE_N(,d,i)
 
 #define DEQ_APPEND_N(n,d1,d2)           \
