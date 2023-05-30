@@ -80,7 +80,7 @@ static void grant_read_buffers(qdr_http2_connection_t *conn, const char *msg)
 {
     if (IS_ATOMIC_FLAG_SET(&conn->raw_closed_read))
         return;
-    int buffers = qd_raw_connection_grant_read_buffers(conn->pn_raw_conn);
+    int buffers = qd_raw_connection_grant_read_buffers(conn->pn_raw_conn, 0);
     qd_log(LOG_HTTP_ADAPTOR, QD_LOG_DEBUG,
            "[C%" PRIu64 "] grant_read_buffers(%s) granted %i read buffers to proton raw api", conn->conn_id, msg,
            buffers);

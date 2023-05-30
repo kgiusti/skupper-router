@@ -539,7 +539,7 @@ static void _replenish_empty_read_buffers(qdr_http1_connection_t *hconn)
     assert(hconn->raw_conn);
 
     if (!hconn->q2_blocked) {
-        int granted = qd_raw_connection_grant_read_buffers(hconn->raw_conn);
+        int granted = qd_raw_connection_grant_read_buffers(hconn->raw_conn, 0);
         qd_log(LOG_HTTP_ADAPTOR, QD_LOG_DEBUG, "[C%" PRIu64 "] %d read buffers granted", hconn->conn_id,
                granted);
     }

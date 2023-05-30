@@ -55,7 +55,11 @@ ALLOC_DEFINE(qdr_tcp_stats_t);
 ALLOC_DEFINE(qd_tcp_listener_t);
 ALLOC_DEFINE(qd_tcp_connector_t);
 
-#define WRITE_BUFFERS 64
+#define RAW_CONN_MAX_READ_CAPACITY 16
+
+// Change the value of MAX_READ_BUFFERS!
+#define MAX_READ_BUFFERS 16
+#define WRITE_BUFFERS    64
 
 #define LOCK   sys_mutex_lock
 #define UNLOCK sys_mutex_unlock
@@ -250,10 +254,19 @@ static void grant_read_buffers(qdr_tcp_connection_t *conn, const char *msg)
 {
     if (IS_ATOMIC_FLAG_SET(&conn->raw_closed_read) || read_window_full(conn))
         return;
-    int granted_read_buffers = qd_raw_connection_grant_read_buffers(conn->pn_raw_conn);
-    qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG,
-           "[C%" PRIu64 "] grant_read_buffers(%s) granted %i read buffers to proton raw api", conn->conn_id, msg,
-           granted_read_buffers);
+
+    size_t current_capacity = pn_raw_connection_read_buffers_capacity(conn->pn_raw_conn);
+    assert(current_capacity <= RAW_CONN_MAX_READ_CAPACITY);
+
+    size_t outstanding_buffs = RAW_CONN_MAX_READ_CAPACITY - current_capacity;
+
+    if (outstanding_buffs < MAX_READ_BUFFERS) {
+        size_t limit                = MAX_READ_BUFFERS - outstanding_buffs;
+        int    granted_read_buffers = qd_raw_connection_grant_read_buffers(conn->pn_raw_conn, limit);
+        qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG,
+               "[C%" PRIu64 "] grant_read_buffers(%s) granted %i read buffers to proton raw api", conn->conn_id, msg,
+               granted_read_buffers);
+    }
 }
 
 static void qd_free_tcp_adaptor_config(qd_tcp_adaptor_config_t *config)
@@ -1030,6 +1043,7 @@ static void handle_connection_event(pn_event_t *e, qd_server_t *qd_server, void 
     qdr_tcp_connection_t *conn = (qdr_tcp_connection_t *) context;
     switch (pn_event_type(e)) {
     case PN_RAW_CONNECTION_CONNECTED: {
+        assert(pn_raw_connection_read_buffers_capacity(conn->pn_raw_conn) == RAW_CONN_MAX_READ_CAPACITY);
         qd_set_vflow_netaddr_string(conn->vflow, conn->pn_raw_conn, conn->ingress);
         if (conn->ingress) {
             qdr_tcp_connection_ingress_accept(conn);

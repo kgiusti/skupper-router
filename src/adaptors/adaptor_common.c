@@ -72,13 +72,16 @@ error:
     return qd_error_code();
 }
 
-int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn)
+int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn, size_t limit)
 {
     assert(pn_raw_conn);
     pn_raw_buffer_t raw_buffers[RAW_BUFFER_BATCH];
     size_t          desired = pn_raw_connection_read_buffers_capacity(pn_raw_conn);
-    const size_t    granted = desired;
 
+    if (limit)
+        desired = MIN(desired, limit);
+
+    const size_t granted = desired;
     while (desired) {
         int i;
         for (i = 0; i < desired && i < RAW_BUFFER_BATCH; ++i) {

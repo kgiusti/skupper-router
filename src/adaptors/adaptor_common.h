@@ -68,12 +68,18 @@ qd_error_t qd_load_adaptor_config(qd_adaptor_config_t *config, qd_entity_t *enti
 void qd_free_adaptor_config(qd_adaptor_config_t *config);
 
 /**
- * Grants as many read qd_adaptor buffers as returned by pn_raw_connection_read_buffers_capacity().
- * Maximum read capacity is set to 16 in proton raw api.
+ * Gives empty qd_adaptor_buffers to the pn_raw_conn for reading incoming data.
+ *
+ * Allocate up to limit buffers for the pn_raw_conn read channel. If limit is zero
+ * give as many buffers as the raw connection will accept.
  *
  * @param raw_conn - The pn_raw_connection_t to which read buffers are granted.
+ * @param limit - maximum number of buffers to give. Note actual number of buffers
+ *  granted may be less than limit.
+ *
+ * @return - actual number of buffers granted.
  */
-int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn);
+int qd_raw_connection_grant_read_buffers(pn_raw_connection_t *pn_raw_conn, size_t limit);
 
 /**
  * Writes as many adaptor buffers as allowed by pn_raw_connection_write_buffers_capacity().
