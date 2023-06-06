@@ -69,6 +69,9 @@ target_link_libraries(threaded_timer_test skupper-router)
 add_executable(adaptor_buffer_test adaptor_buffer_test.c)
 target_link_libraries(adaptor_buffer_test skupper-router)
 
+add_executable(tcp-proxy tcp-proxy.c)
+target_link_libraries(tcp-proxy skupper-router)
+
 # Bubblewrap is an unprivileged sandboxing tool for Linux. Setting --unshare-net allows
 # running tests in parallel (the ctest -j option) without port clashes
 set(USE_BWRAP OFF CACHE BOOL "Wrap test executions with bwrap (https://github.com/containers/bubblewrap)")
