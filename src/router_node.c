@@ -397,7 +397,12 @@ static int AMQP_conn_wake_handler(void *type_context, qd_connection_t *conn, voi
             //
             qd_message_send(stream, qlink, 0, &q3_stalled);
             if (q3_stalled) {
-                qd_link_q3_block(qlink);
+                size_t count = qd_link_q3_block(qlink);
+                (void) count;
+                qconn->kag_blocks++;
+                //if (qconn && count == 0) {
+                    //qconn->kag_blocks++;
+                //}
             }
 
             //
@@ -1140,8 +1145,11 @@ static int AMQP_link_flow_handler(void* context, qd_link_t *link)
     qd_router_t *router  = (qd_router_t*) context;
     pn_link_t   *pnlink  = qd_link_pn(link);
     qdr_link_t  *rlink   = (qdr_link_t*) qd_link_get_context(link);
+    qdr_connection_t *conn = 0;
 
     if (rlink) {
+        conn = rlink->conn;
+        conn->kag_flows++;
         qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
     }
 
@@ -1151,9 +1159,21 @@ static int AMQP_link_flow_handler(void* context, qd_link_t *link)
         qd_session_t *qd_ssn = qd_session_from_pn(pn_ssn);
         if (qd_ssn && qd_session_is_q3_blocked(qd_ssn)) {
             // Q3 blocked - have we drained enough outgoing bytes?
-            const size_t q3_lower = QD_BUFFER_SIZE * QD_QLIMIT_Q3_LOWER;
-            if (pn_session_outgoing_bytes(pn_ssn) < q3_lower) {
+
+
+            qd_log(LOG_ROUTER, QD_LOG_INFO,
+                   "qd_session: %p flow, capacity=%zu (%d)", (void *)qd_ssn, qd_session_outgoing_buffer_capacity(qd_ssn), QD_QLIMIT_Q3_LOWER);
+
+            
+            // if (qd_session_outgoing_buffer_capacity(qd_ssn) > QD_QLIMIT_Q3_LOWER) {
+
+            // KAG FIX ME!!!!
+            if (qd_session_outgoing_buffer_capacity(qd_ssn) > 0) {
+                // KAG FIX ME!!!!
+                
                 // yes.  We must now unblock all links that have been blocked by Q3
+                //if (conn)
+                // conn->kag_blocks++;
 
                 qd_link_list_t  *blinks = qd_session_q3_blocked_links(qd_ssn);
                 qd_link_t       *blink  = DEQ_HEAD(*blinks);
@@ -2210,8 +2230,14 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
     }
 
     if (q3_stalled) {
-        qd_link_q3_block(qlink);
+        qdr_connection_t *qconn = link->conn;
+        qconn->kag_blocks++;
+        size_t count = qd_link_q3_block(qlink);
         qdr_link_stalled_outbound(link);
+        (void)count;
+        //if (qconn && count == 0) {
+            //qconn->kag_blocks++;
+        //}
     }
 
     if (send_complete) {

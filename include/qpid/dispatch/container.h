@@ -237,12 +237,19 @@ void qd_link_set_link_id(qd_link_t *link, uint64_t link_id);
 struct qd_message_t;
 void qd_link_set_incoming_msg(qd_link_t *link, struct qd_message_t *msg);
 
-qd_session_t *qd_session(pn_session_t *pn_ssn);
+qd_session_t *qd_session(qd_connection_t *conn, pn_session_t *pn_ssn);
+qd_connection_t *qd_session_connection(const qd_session_t *qd_ssn);
 void qd_session_cleanup(qd_connection_t *qd_conn);
 void qd_session_free(qd_session_t *qd_ssn);
 bool qd_session_is_q3_blocked(const qd_session_t *qd_ssn);
 qd_link_list_t *qd_session_q3_blocked_links(qd_session_t *qd_ssn);
 
+size_t qd_session_outgoing_buffer_capacity(const qd_session_t *qd_ssn);
+qd_session_t *qd_link_session(const qd_link_t *link);
+pn_connection_t *qd_connection_pn_conn(const qd_connection_t *qd_conn);
+bool qd_session_is_q3_blocked(const qd_session_t *qd_ssn);
+bool qd_link_is_q3_blocked(const qd_link_t *link);
+    
 void qd_connection_log_policy_denial(qd_link_t *link, const char *text);
 
 

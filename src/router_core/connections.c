@@ -1709,6 +1709,11 @@ void qdr_connection_free(qdr_connection_t *conn)
     sys_mutex_free(&conn->work_lock);
     qdr_error_free(conn->error);
     qdr_connection_info_free(conn->connection_info);
+
+    if (conn->kag_flows || conn->kag_blocks) {
+        qd_log(LOG_ROUTER_CORE, QD_LOG_INFO,
+               "[C%" PRIu64 "] flow events: %" PRIu64 " ssn blocks: %" PRIu64, conn->identity, conn->kag_flows, conn->kag_blocks);
+    }
     free_qdr_connection_t(conn);
 }
 

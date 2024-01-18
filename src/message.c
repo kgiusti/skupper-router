@@ -1870,30 +1870,43 @@ uint32_t _compose_router_annotations(qd_message_pvt_t *msg, unsigned int ra_flag
 }
 
 
-static void qd_message_send_cut_through(qd_message_pvt_t *msg, qd_message_content_t *content, pn_link_t *pnl, pn_session_t *pns, bool *q3_stalled)
+static void qd_message_send_cut_through(qd_message_pvt_t *msg, qd_message_content_t *content, pn_link_t *pnl, qd_session_t *qd_ssn, bool *q3_stalled)
 {
-    const size_t q3_upper = QD_BUFFER_SIZE * QD_QLIMIT_Q3_UPPER;
+    unsigned long kag = 0;
 
-    *q3_stalled = !IS_ATOMIC_FLAG_SET(&content->aborted) && (pn_session_outgoing_bytes(pns) >= q3_upper);
-    while (!*q3_stalled && (sys_atomic_get(&content->uct_consume_slot) - sys_atomic_get(&content->uct_produce_slot)) % UCT_SLOT_COUNT != 0) {
+    size_t buf_limit = qd_session_outgoing_buffer_capacity(qd_ssn);
+    while (buf_limit > 0 && (sys_atomic_get(&content->uct_consume_slot) - sys_atomic_get(&content->uct_produce_slot)) % UCT_SLOT_COUNT != 0) {
         uint32_t use_slot = sys_atomic_get(&content->uct_consume_slot);
 
         qd_buffer_t *buf = DEQ_HEAD(content->uct_slots[use_slot]);
-        while (!!buf) {
+        while (!!buf && buf_limit > 0) {
             DEQ_REMOVE_HEAD(content->uct_slots[use_slot]);
             if (!IS_ATOMIC_FLAG_SET(&content->aborted)) {
                 pn_link_send(pnl, (char*) qd_buffer_base(buf), qd_buffer_size(buf));
             }
+            kag += 1;
             qd_buffer_free(buf);
+            buf_limit -= 1;
             buf = DEQ_HEAD(content->uct_slots[use_slot]);
         }
 
-        sys_atomic_set(&content->uct_consume_slot, (use_slot + 1) % UCT_SLOT_COUNT);
-        *q3_stalled = !IS_ATOMIC_FLAG_SET(&content->aborted) && (pn_session_outgoing_bytes(pns) >= q3_upper);
+        if (DEQ_IS_EMPTY(content->uct_slots[use_slot])) {
+            sys_atomic_set(&content->uct_consume_slot, (use_slot + 1) % UCT_SLOT_COUNT);
+        } else {
+            assert(buf_limit == 0);
+        }
     }
 
-    if ((IS_ATOMIC_FLAG_SET(&content->aborted) || IS_ATOMIC_FLAG_SET(&content->receive_complete))
-        && sys_atomic_get(&content->uct_consume_slot) == sys_atomic_get(&content->uct_produce_slot)) {
+    bool empty = sys_atomic_get(&content->uct_consume_slot) == sys_atomic_get(&content->uct_produce_slot);
+    ///*q3_stalled = qd_session_outgoing_buffer_capacity(qd_ssn) == 0 && !empty;
+    *q3_stalled = buf_limit == 0 && !empty;
+
+        ///
+        qd_log(LOG_MESSAGE, QD_LOG_INFO, "qd_session: %p uct end out capacity=%zu sent bufs=%lu limit=%zu stalled=%d",
+               (void *) qd_ssn, qd_session_outgoing_buffer_capacity(qd_ssn), kag, buf_limit, *q3_stalled);
+        ///
+
+    if (empty && (IS_ATOMIC_FLAG_SET(&content->aborted) || IS_ATOMIC_FLAG_SET(&content->receive_complete))) {
         //
         // The stream is aborted or receive complete (no new content expected) AND we have consumed
         // all of the buffered content.  Mark the message as send-complete.
@@ -1908,18 +1921,37 @@ void qd_message_send(qd_message_t *in_msg,
                      unsigned int  ra_flags,
                      bool         *q3_stalled)
 {
+
+    unsigned long kag = 0;
+
     qd_message_pvt_t     *msg     = (qd_message_pvt_t*) in_msg;
     qd_message_content_t *content = msg->content;
     pn_link_t            *pnl     = qd_link_pn(link);
-    pn_session_t         *pns     = pn_link_session(pnl);
+    qd_session_t         *qd_ssn  = qd_link_session(link);
 
-    *q3_stalled = false;
+    ///
+    if (qd_link_is_q3_blocked(link)) {
+        qd_log(LOG_MESSAGE, QD_LOG_INFO, "qd_session: %p blocked link %p activated!",
+               (void *) qd_ssn, (void *) link);
+    }
+    //
+    
+    CHECK_PROACTOR_CONNECTION(qd_connection_pn_conn(qd_session_connection(qd_ssn)));
 
+    *q3_stalled = qd_session_outgoing_buffer_capacity(qd_ssn) == 0;
+    if (*q3_stalled)
+        return;
+
+    ///
+    qd_log(LOG_MESSAGE, QD_LOG_INFO, "qd_session: %p start out capacity=%zu",
+           (void *) qd_ssn, qd_session_outgoing_buffer_capacity(qd_ssn));
+    ///
+    
     if (msg->uct_started) {
         //
         // Perform the cut-through transfer from the message content to the outbound link
         //
-        qd_message_send_cut_through(msg, content, pnl, pns, q3_stalled);
+        qd_message_send_cut_through(msg, content, pnl, qd_ssn, q3_stalled);
         return;
     }
 
@@ -1976,20 +2008,13 @@ void qd_message_send(qd_message_t *in_msg,
     qd_buffer_t *buf = msg->cursor.buffer;
 
     qd_message_q2_unblocker_t  q2_unblock = {0};
-    const size_t               q3_upper   = QD_BUFFER_SIZE * QD_QLIMIT_Q3_UPPER;
-
-    CHECK_PROACTOR_CONNECTION(pn_session_connection(pns));
-
+    size_t window_limit = qd_session_outgoing_buffer_capacity(qd_ssn) * QD_BUFFER_SIZE;
     while (!IS_ATOMIC_FLAG_SET(&content->aborted)
            && buf
-           && pn_session_outgoing_bytes(pns) < q3_upper) {
+           && window_limit > 0) {
 
-        // This will send the remaining data in the buffer if any. There may be
-        // zero bytes left to send if we stopped here last time and there was
-        // no next buf
-        //
-        size_t buf_size = qd_buffer_size(buf);
-        int num_bytes_to_send = buf_size - (msg->cursor.cursor - qd_buffer_base(buf));
+        size_t buf_size = qd_buffer_size(buf) - (msg->cursor.cursor - qd_buffer_base(buf));
+        size_t num_bytes_to_send = MIN(window_limit, buf_size);
         ssize_t bytes_sent = 0;
         if (num_bytes_to_send > 0) {
             bytes_sent = pn_link_send(pnl, (const char*)msg->cursor.cursor, num_bytes_to_send);
@@ -2014,8 +2039,10 @@ void qd_message_send(qd_message_t *in_msg,
         } else {
 
             msg->cursor.cursor += bytes_sent;
+            window_limit -= bytes_sent;
+            buf_size -= bytes_sent;
 
-            if (bytes_sent == num_bytes_to_send) {
+            if (buf_size == 0) {
                 //
                 // sent the whole buffer.
                 // Can we move to the next buffer?  Only if there is a next buffer
@@ -2061,13 +2088,15 @@ void qd_message_send(qd_message_t *in_msg,
 
                 buf = next_buf;
 
-            } else if (num_bytes_to_send && bytes_sent == 0) {
+            } else {
                 //
-                // the proton link cannot take anymore data,
+                // link will not accept the full buffer.
                 // retry later...
                 //
                 buf = 0;
                 qd_log(LOG_MESSAGE, QD_LOG_DEBUG, "Link %s output limit reached", pn_link_name(pnl));
+                qd_log(LOG_MESSAGE, QD_LOG_DEBUG, "qd_session %p: buf_size=%zu window_limit=%zu",
+                       (void *)qd_ssn, buf_size, window_limit);
             }
         }
 
@@ -2095,9 +2124,16 @@ void qd_message_send(qd_message_t *in_msg,
         && (!msg->cursor.buffer || ((msg->cursor.cursor - qd_buffer_base(msg->cursor.buffer) == qd_buffer_size(msg->cursor.buffer))
                                    && !DEQ_NEXT(msg->cursor.buffer)))) {
         msg->uct_started = true;
-        qd_message_send_cut_through(msg, content, pnl, pns, q3_stalled);
+        qd_message_send_cut_through(msg, content, pnl, qd_ssn, q3_stalled);
     } else {
-        *q3_stalled = (pn_session_outgoing_bytes(pns) >= q3_upper);
+        //*q3_stalled = qd_session_outgoing_buffer_capacity(qd_ssn) == 0;
+        *q3_stalled = window_limit == 0;
+
+        ///
+        qd_log(LOG_MESSAGE, QD_LOG_INFO, "qd_session: %p end out capacity=%zu sent bytes=%lu stall=%d",
+               (void *) qd_ssn, qd_session_outgoing_buffer_capacity(qd_ssn), kag, *q3_stalled);
+        ///
+
     }
 }
 
