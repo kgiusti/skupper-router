@@ -84,6 +84,9 @@ static sys_thread_t    *callback_thread = 0;
  */
 static qd_timestamp_t   time_base = 0;
 
+// DEBUG:
+static qd_duration_t max_handler;
+
 ALLOC_DECLARE(qd_timer_t);
 ALLOC_DEFINE(qd_timer_t);
 
@@ -292,6 +295,10 @@ void qd_timer_initialize(void)
 void qd_timer_finalize(void)
 {
     sys_mutex_free(&lock);
+    if (max_handler) {
+        fprintf(stdout, "MAX TIME=%lld\n", (long long) max_handler);
+        fflush(0);
+    }
 }
 
 
@@ -314,7 +321,12 @@ void qd_timer_visit(void)
          * dropped.  Attempting to delete the timer now will cause the caller to
          * block until the callback is done.
          */
+        qd_timestamp_t start = qd_timer_now();
         timer->handler(timer->context);
+        qd_timestamp_t end = qd_timer_now();
+        if (end - start > max_handler) {
+            max_handler = end - start;
+        }
 
         sys_mutex_lock(&lock);
         if (timer->state == QD_TIMER_STATE_BLOCKED) {
