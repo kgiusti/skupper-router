@@ -20,6 +20,7 @@
 #include "private.h"
 #include "qd_connector.h"
 #include "qd_connection.h"
+#include "qd_listener.h"
 #include "container.h"
 #include "node_type.h"
 
@@ -2317,22 +2318,22 @@ static void qd_amqp_adaptor_init(qdr_core_t *core, void **adaptor_context)
     amqp_adaptor.router  = qd->router;
     amqp_adaptor.container = qd_container(qd->router, &router_node);
     amqp_adaptor.adaptor = qdr_protocol_adaptor(core,
-                                                        "amqp",
-                                                        (void*) amqp_adaptor.router,
-                                                        CORE_connection_activate,
-                                                        CORE_link_first_attach,
-                                                        CORE_link_second_attach,
-                                                        CORE_link_detach,
-                                                        CORE_link_flow,
-                                                        CORE_link_offer,
-                                                        CORE_link_drained,
-                                                        CORE_link_drain,
-                                                        CORE_link_push,
-                                                        CORE_link_deliver,
-                                                        CORE_link_get_credit,
-                                                        CORE_delivery_update,
-                                                        CORE_close_connection,
-                                                        CORE_conn_trace);
+                                                "amqp",
+                                                (void*) amqp_adaptor.router,
+                                                CORE_connection_activate,
+                                                CORE_link_first_attach,
+                                                CORE_link_second_attach,
+                                                CORE_link_detach,
+                                                CORE_link_flow,
+                                                CORE_link_offer,
+                                                CORE_link_drained,
+                                                CORE_link_drain,
+                                                CORE_link_push,
+                                                CORE_link_deliver,
+                                                CORE_link_get_credit,
+                                                CORE_delivery_update,
+                                                CORE_close_connection,
+                                                CORE_conn_trace);
 
     *adaptor_context = (void *) &amqp_adaptor;
 }
@@ -2366,8 +2367,12 @@ static void qd_amqp_adaptor_final(void *adaptor_context)
         if (ctx->policy_settings)
             qd_policy_settings_free(ctx->policy_settings);
         if (ctx->connector) {
-            ctx->connector->qd_conn = 0;
-            qd_connector_decref(ctx->connector);
+            qd_connector_release_connection(ctx->connector);
+            ctx->connector = 0;
+        }
+        if (ctx->listener) {
+            qd_listener_release_connection(ctx->listener, ctx);
+            ctx->listener = 0;
         }
         sys_atomic_destroy(&ctx->wake_core);
         sys_atomic_destroy(&ctx->wake_cutthrough_inbound);

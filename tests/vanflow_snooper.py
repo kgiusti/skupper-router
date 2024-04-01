@@ -50,6 +50,7 @@ record_types = {
     12: "PROCESS_GROUP",
     13: "HOST",
     14: "LOG",
+    15: "ACCESS_POINT"
 }
 
 RECORD_TYPE = 0
@@ -107,7 +108,10 @@ attribute_types = {
     48: "LOG_SEVERITY",
     49: "LOG_TEXT",
     50: "SOURCE_FILE",
-    51: "SOURCE_LINE"
+    51: "SOURCE_LINE",
+    52: "LINK_COUNT",
+    53: "OPER_STATUS",
+    54: "ROLE"
 }
 
 

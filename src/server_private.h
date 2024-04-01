@@ -31,6 +31,7 @@
 #include "qpid/dispatch/server.h"
 #include "qpid/dispatch/threading.h"
 #include "qpid/dispatch/discriminator.h"
+#include "qpid/dispatch/vanflow.h"
 
 #include <proton/engine.h>
 #include <proton/event.h>
