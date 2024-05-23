@@ -297,7 +297,6 @@ jobs:
         run: |
           sudo sysctl -w kernel.core_pattern="coredump.%e.%p"
           ulimit -c unlimited
-          sudo sysctl -w vm.mmap_rnd_bits=28
           ctest --timeout 1200 -V --output-junit=Testing/Test.xml --no-compress-output -I ${{matrix.shard}},,${{matrix.shards}} -j12 ${{env.RouterCTestExtraArgs}}
 
       - name: Report coredump stacktraces (if any tests failed)
