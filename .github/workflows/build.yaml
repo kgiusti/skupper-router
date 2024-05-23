@@ -55,7 +55,7 @@ jobs:
         os: [ubuntu-22.04]
         buildType: [Debug, RelWithDebInfo]
         #runtimeCheck: [asan, tsan]
-        runtimeCheck: OFF
+        runtimeCheck: [OFF]
         protonGitRef:
           - ${{ github.event.inputs.protonBranch || 'main' }}
           - 0.39.0
