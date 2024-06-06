@@ -45,7 +45,9 @@ static int rx_request(qd_http1_decoder_connection_t *hconn, const char *method, 
     qdpo_transport_handle_t *th = (qdpo_transport_handle_t *) qd_http1_decoder_connection_get_context(hconn);
     assert(th);
 
-    qd_log(LOG_HTTP1_OBSERVER, QD_LOG_DEBUG, "[C%" PRIu64 "] HTTP/1.1 observer rx_request(method=%s target=%s)", th->conn_id, method, target);
+    qd_log(LOG_HTTP1_OBSERVER, QD_LOG_DEBUG,
+           "[C%" PRIu64 "] HTTP/1.1 observer rx_request(method=%s target=%s version=%"PRIu32".%"PRIu32")",
+           th->conn_id, method, target, version_major, version_minor);
 
     http1_request_state_t *hreq = new_http1_request_state_t();
     ZERO(hreq);
@@ -65,7 +67,9 @@ static int rx_response(qd_http1_decoder_connection_t *hconn, uintptr_t request_c
     qdpo_transport_handle_t *th = (qdpo_transport_handle_t *) qd_http1_decoder_connection_get_context(hconn);
     assert(th);
 
-    qd_log(LOG_HTTP1_OBSERVER, QD_LOG_DEBUG, "[C%" PRIu64 "] HTTP/1.1 observer rx_response(status=%d reason=%s)", th->conn_id, status_code, reason_phrase);
+    qd_log(LOG_HTTP1_OBSERVER, QD_LOG_DEBUG,
+           "[C%" PRIu64 "] HTTP/1.1 observer rx_response(status=%d reason=%s version=%"PRIu32".%"PRIu32")",
+           th->conn_id, status_code, reason_phrase, version_major, version_minor);
 
     http1_request_state_t *hreq = (http1_request_state_t *) request_context;
     assert(hreq);

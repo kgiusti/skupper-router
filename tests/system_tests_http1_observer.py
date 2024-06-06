@@ -123,15 +123,14 @@ class Http1ObserverTest(TestCase):
 
         curl_args = [
             '--http1.1',
-            '--output', "/dev/null",
             '-G'
         ]
 
         pages = ['index.html', 't100K.html', 't10K.html', 't1K.html']
         for page in pages:
             curl_args.append(f"http://localhost:{l_port}/{page}")
-        (rc, _, err) = run_curl(args=curl_args)
-        self.assertEqual(0, rc, f"curl failed: {err}")
+        (rc, out, err) = run_curl(args=curl_args)
+        self.assertEqual(0, rc, f"curl failed: {rc}, {err}, {out}")
 
         # Expect at least 8 records:
         # 1 - Listener
@@ -183,27 +182,25 @@ class Http1ObserverTest(TestCase):
 
         curl_args = [
             '--http1.1',
-            '--output', "/dev/null",
             '-H', "Transfer-Encoding: chunked",
             '--data-ascii', "Start",
             '--data-ascii', "End",
             f"http://localhost:{l_port}/cgi-bin/script.py"
         ]
 
-        (rc, _, err) = run_curl(args=curl_args)
-        self.assertEqual(0, rc, f"curl post failed: {err}")
+        (rc, out, err) = run_curl(args=curl_args)
+        self.assertEqual(0, rc, f"curl post failed: {rc}, {err}, {out}")
 
         # this will pipeline 3 get requests due to the globbing parameter
         # 'ignore':
         curl_args = [
             '--http1.1',
-            '--output', "/dev/null",
             '-G',
             f"http://localhost:{l_port}/index.html?ignore=[1-3]"
         ]
 
-        (rc, _, err) = run_curl(args=curl_args)
-        self.assertEqual(0, rc, f"curl get failed: {err}")
+        (rc, out, err) = run_curl(args=curl_args)
+        self.assertEqual(0, rc, f"curl get failed: {rc}, {err}, {out}")
 
         # Expect at least 10 records: listener, connector, two tcp flows, two
         # counter flows, and 4 HTTP requests:
