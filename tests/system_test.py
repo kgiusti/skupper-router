@@ -522,7 +522,9 @@ class Http1Server(Process):
         name = name or "http.server"
         kwargs.setdefault('stdin', subprocess.DEVNULL)  # no input accepted
         kwargs.setdefault('directory', os.path.join(current_dir, "http1-data"))
-        kwargs.setdefault('protocol', "HTTP/1.1")
+        if sys.version_info >= (3, 11):
+            # --protocol added in python3.11
+            kwargs.setdefault('protocol', "HTTP/1.1")
         args = [sys.executable,
                 "-m", "http.server",
                 "-d", kwargs['directory'],

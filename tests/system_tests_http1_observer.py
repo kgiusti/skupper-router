@@ -22,6 +22,7 @@
 #
 
 import os
+import sys
 
 from system_test import TestCase, unittest, main_module, Qdrouterd
 from system_test import curl_available, run_curl
@@ -85,7 +86,7 @@ class Http1ObserverTest(TestCase):
                      'includeTimestamp': 'false',
                      'includeSource': 'false',
                      'outputFile': os.path.abspath(f"{name}-flow.log")}),
-            ('log', {'module': 'HTTP_OBSERVER', 'enable': 'debug+'}),
+            ('log', {'module': 'HTTP1_OBSERVER', 'enable': 'debug+'}),
             ('log', {'module': 'FLOW_LOG', 'enable': 'debug+'})
         ]
 
@@ -108,6 +109,7 @@ class Http1ObserverTest(TestCase):
         cls.http1_port = cls.tester.get_port()
         cls.http1_server = cls.tester.cleanup(Http1Server(cls.http1_port))
 
+    @unittest.skipUnless(sys.version_info >= (3, 11), "Requires HTTP/1.1 support")
     def test_01_get(self):
         """
         Simple pipelined GET request.
@@ -163,6 +165,7 @@ class Http1ObserverTest(TestCase):
 
         self.assertEqual(len(pages), matches, f"unexpected results {results}")
 
+    @unittest.skipUnless(sys.version_info >= (3, 11), "Requires HTTP/1.1 support")
     def test_02_post(self):
         """
         Simple POST request (chunked). Uses the Http server from the Python
