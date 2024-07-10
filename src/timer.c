@@ -31,6 +31,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 
 // timer state machine
@@ -68,6 +69,7 @@ struct qd_timer_t {
     sys_cond_t        condition;
     sys_atomic_t      ref_count; // referenced by user and when on scheduled list
     qd_timestamp_t    delta_time;
+    qd_timestamp_t    deadline;  // expected time of expiration
     qd_timer_state_t  state;
 };
 
@@ -114,8 +116,10 @@ static bool timer_cancel_LH(qd_timer_t *timer) TA_REQ(lock)
 }
 
 
-/* Adjust timer's time_base and delays for the current time. */
-static void timer_adjust_now_LH(void) TA_REQ(lock)
+/** Adjust timer's time_base and delays for the current time.
+ * return: the current time used to adjust all pending timers
+ */
+static qd_timestamp_t timer_adjust_now_LH(void) TA_REQ(lock)
 {
     qd_timestamp_t now = qd_timer_now();
     if (time_base != 0 && now > time_base) {
@@ -132,6 +136,7 @@ static void timer_adjust_now_LH(void) TA_REQ(lock)
         }
     }
     time_base = now;
+    return now;
 }
 
 
@@ -221,7 +226,9 @@ void qd_timer_schedule(qd_timer_t *timer, qd_duration_t duration)
     //
     // Find the insert point in the schedule.
     //
-    timer_adjust_now_LH();   /* Adjust the timers for current time */
+    const qd_timestamp_t now = timer_adjust_now_LH();   /* Adjust the timers for current time */
+
+    timer->deadline = duration + now;  // for detecting clock delays
 
     /* Invariant: time_before == total time up to but not including ptr */
     qd_timer_t *ptr = DEQ_HEAD(scheduled_timers);
@@ -307,14 +314,16 @@ void qd_timer_visit(void)
 {
     sys_mutex_lock(&lock);
     callback_thread = sys_thread_self();
-    timer_adjust_now_LH();
+    (void) timer_adjust_now_LH();
     qd_timer_t *timer = DEQ_HEAD(scheduled_timers);
+    bool first_timer = true;
     while (timer && timer->delta_time == 0) {
         // Remove timer from scheduled_timers but keep ref_count
         assert(timer->state == QD_TIMER_STATE_SCHEDULED);
         // note: still holding scheduled_timers refcount
         timer_cancel_LH(timer);
         timer->state = QD_TIMER_STATE_RUNNING;
+        const qd_timestamp_t deadline = timer->deadline;
         sys_mutex_unlock(&lock);
 
         /* The callback may reschedule or delete the timer while the lock is
@@ -322,6 +331,10 @@ void qd_timer_visit(void)
          * block until the callback is done.
          */
         qd_timestamp_t start = qd_timer_now();
+        if (first_timer && (start - deadline) > 3000) {
+            fprintf(stdout, "TIME DRIFT=%" PRId64 " msecs\n", (start - deadline));
+        }
+
         timer->handler(timer->context);
         qd_timestamp_t end = qd_timer_now();
         if (end - start > max_handler) {
@@ -339,6 +352,7 @@ void qd_timer_visit(void)
         // now drop scheduled_timers reference:
         timer_decref_LH(timer);
         timer = DEQ_HEAD(scheduled_timers);
+        first_timer = false;
     }
     qd_timer_t *first = DEQ_HEAD(scheduled_timers);
     if (first) {
