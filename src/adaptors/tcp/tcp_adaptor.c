@@ -28,6 +28,8 @@
 #include <qpid/dispatch/platform.h>
 #include <qpid/dispatch/connection_counters.h>
 #include <qpid/dispatch/vanflow.h>
+#include <qpid/dispatch/tls.h>
+#include <qpid/dispatch/tls_raw_io.h>
 #include <proton/proactor.h>
 #include <proton/raw_connection.h>
 #include <proton/listener.h>
@@ -71,6 +73,13 @@ ENUM_DEFINE(qd_tcp_connection_state, state_names);
 
 #define CONNECTION_CLOSE_TIME 10000
 #define RAW_BUFFER_BATCH_SIZE 16
+
+// ALPN Protocol Property Map Key
+// When ALPN is negotiated with a TLS client the agreed upon value needs to be proxied to the server facing end of the
+// connection. The server-facing handshake will use that negotiated ALPN value. Typically the negotiated ALPN value is
+// added to the message application property map. This defines the map key used.
+#define ALPN_KEY      "alpn"
+#define ALPN_KEY_LEN  4
 
 //
 // Global Adaptor State
@@ -128,9 +137,10 @@ static void connection_run_CSIDE_IO(qd_tcp_connection_t *conn);
 static void connection_run_XSIDE_IO(qd_tcp_connection_t *conn);
 static uint64_t validate_outbound_message(const qdr_delivery_t *out_dlv);
 static void on_accept(qd_adaptor_listener_t *listener, pn_listener_t *pn_listener, void *context);
-static void on_tls_connection_secured(qd_tls_t *tls, void *user_context);
+static void on_tls_connection_secured(qd_tls2_session_t *tls, void *user_context);
 static char *get_tls_negotiated_alpn(qd_message_t *msg);  // caller must free() returned string!
-static int setup_tls_session(qd_tcp_connection_t *conn, const qd_tls_domain_t *parent_domain, const char *alpn_protocol);
+static int setup_tls_session(qd_tcp_connection_t *conn, qd_tls2_domain_t *parent_domain,
+                             const char *alpn_protocol, const char *peer_hostname);
 static void free_tcp_resource(qd_tcp_common_t *resource);
 
 //=================================================================================
@@ -192,7 +202,7 @@ static void qd_tcp_listener_free(qd_tcp_listener_t *listener)
     qdpo_free(listener->protocol_observer);
     qdpo_config_free(listener->protocol_observer_config);
 
-    qd_tls_domain_decref(listener->tls_domain);
+    qd_tls2_domain_decref(listener->tls_domain);
     qd_free_adaptor_config(listener->adaptor_config);
     sys_mutex_free(&listener->lock);
     free_qd_tcp_listener_t(listener);
@@ -228,7 +238,7 @@ static void qd_tcp_connector_free(qd_tcp_connector_t *connector)
             "Deleted TcpConnector for %s, %s:%s",
             connector->adaptor_config->address, connector->adaptor_config->host, connector->adaptor_config->port);
 
-    qd_tls_domain_decref(connector->tls_domain);
+    qd_tls2_domain_decref(connector->tls_domain);
     qd_free_adaptor_config(connector->adaptor_config);
 
     // Pass connector to Core for final deallocation. The Core will free the cr->lock.
@@ -630,8 +640,7 @@ static void close_connection_XSIDE_IO(qd_tcp_connection_t *conn)
         qd_connection_counter_dec(QD_PROTOCOL_TCP);
     }
 
-    qd_tls_free2(conn->tls);
-    qd_tls_domain_decref(conn->tls_domain);
+    qd_tls2_session_free(conn->tls_session);
     free(conn->alpn_protocol);
 
     conn->reply_to          = 0;
@@ -644,8 +653,7 @@ static void close_connection_XSIDE_IO(qd_tcp_connection_t *conn)
     conn->observer_handle   = 0;
     conn->common.vflow      = 0;
     conn->core_conn         = 0;
-    conn->tls               = 0;
-    conn->tls_domain        = 0;
+    conn->tls_session       = 0;
 
     if (conn->common.parent) {
         if (conn->common.parent->context_type == TL_LISTENER) {
@@ -838,7 +846,7 @@ static void copy_message_body_TLS_XSIDE_IO(qd_tcp_connection_t *conn, qd_message
 {
     size_t   offset = 0;
 
-    assert(conn->tls);
+    assert(conn->tls_session);
 
     if (!conn->outbound_body) {
         assert(!conn->outbound_body_complete);
@@ -1002,7 +1010,7 @@ static bool try_compose_and_send_client_stream_LSIDE_IO(qd_tcp_connection_t *con
             // add the ALPN protocol as negotiated with the remote via TLS.
             message = qd_compose(QD_PERFORMATIVE_APPLICATION_PROPERTIES, message);
             qd_compose_start_map(message);
-            qd_compose_insert_string_n(message, (const char *) QD_TLS_ALPN_KEY, QD_TLS_ALPN_KEY_LEN);
+            qd_compose_insert_string_n(message, (const char *) ALPN_KEY, ALPN_KEY_LEN);
             qd_compose_insert_string_n(message, (const char *) conn->alpn_protocol,
                                        strlen(conn->alpn_protocol));
             qd_compose_end_map(message);
@@ -1538,10 +1546,10 @@ static int64_t tls_consume_data_buffers(void *context, qd_buffer_list_t *buffers
 static bool manage_tls_flow_XSIDE_IO(qd_tcp_connection_t *conn)
 {
     ASSERT_RAW_IO;
-    assert(conn->tls);
+    assert(conn->tls_session);
     assert(conn->raw_conn);
 
-    if (qd_tls_is_error(conn->tls))
+    if (qd_tls2_session_is_error(conn->tls_session))
         return false;
 
     qd_buffer_list_t decrypted_buffers = DEQ_EMPTY;
@@ -1553,9 +1561,9 @@ static bool manage_tls_flow_XSIDE_IO(qd_tcp_connection_t *conn)
 
     grant_read_buffers_XSIDE_IO(conn, pn_raw_connection_read_buffers_capacity(conn->raw_conn));
 
-    const int tls_status = qd_tls_do_io2(conn->tls, conn->raw_conn, tls_consume_data_buffers, conn,
-                                         (can_produce) ? &decrypted_buffers : 0,
-                                         &decrypted_octets);
+    const int tls_status = qd_tls2_session_do_io(conn->tls_session, conn->raw_conn, tls_consume_data_buffers, conn,
+                                                 (can_produce) ? &decrypted_buffers : 0,
+                                                 &decrypted_octets);
 
     //
     // Process inbound cleartext data.
@@ -1604,7 +1612,7 @@ static bool manage_tls_flow_XSIDE_IO(qd_tcp_connection_t *conn)
     // Check for end of inbound message data
     //
     bool ignore;
-    if (qd_tls_is_input_drained(conn->tls, &ignore) && conn->inbound_stream) {
+    if (qd_tls2_session_is_input_drained(conn->tls_session, &ignore) && conn->inbound_stream) {
         qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG, DLV_FMT " TLS inbound stream receive complete, producer activation cancelled", DLV_ARGS(conn->inbound_delivery));
 
         qd_message_set_receive_complete(conn->inbound_stream);
@@ -1620,7 +1628,7 @@ static bool manage_tls_flow_XSIDE_IO(qd_tcp_connection_t *conn)
     //
     // Check for end of outbound message data
     //
-    if (qd_tls_is_output_flushed(conn->tls) && conn->outbound_stream) {
+    if (qd_tls2_session_is_output_flushed(conn->tls_session) && conn->outbound_stream) {
         qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG, DLV_FMT " TLS outbound stream send complete, consumer activation cancelled", DLV_ARGS(conn->outbound_delivery));
 
         qd_message_set_send_complete(conn->outbound_stream);
@@ -1652,7 +1660,7 @@ static void connection_run_LSIDE_IO(qd_tcp_connection_t *conn)
             if (IS_ATOMIC_FLAG_SET(&conn->raw_opened)) { // raw connection is active
                 qd_tcp_listener_t *li = (qd_tcp_listener_t *) conn->common.parent;
                 if (li->tls_domain) {
-                    if (setup_tls_session(conn, li->tls_domain, 0) != 0) {
+                    if (setup_tls_session(conn, li->tls_domain, 0, li->adaptor_config->host) != 0) {
                         // TLS setup failed: check logs for details
                         close_raw_connection(conn, "TLS-connection-failed", "Error loading credentials");
                         set_state_XSIDE_IO(conn, XSIDE_CLOSING);  // prevent further connection I/O
@@ -1674,18 +1682,18 @@ static void connection_run_LSIDE_IO(qd_tcp_connection_t *conn)
             // for two reasons: 1) don't establish router links and reply addresses if the client's creditials are bad
             // and 2) we need the negotiated ALPN value *before* we can construct the inbound message headers.
             //
-            assert(conn->tls);
-            if (!qd_tls_is_secure(conn->tls) && !qd_tls_is_error(conn->tls)) {
+            assert(conn->tls_session);
+            if (!qd_tls2_session_is_secure(conn->tls_session) && !qd_tls2_session_is_error(conn->tls_session)) {
                 assert(conn->raw_conn);
                 grant_read_buffers_XSIDE_IO(conn, pn_raw_connection_read_buffers_capacity(conn->raw_conn));
-                int rc = qd_tls_do_io2(conn->tls, conn->raw_conn, 0, 0, 0, 0);
+                int rc = qd_tls2_session_do_io(conn->tls_session, conn->raw_conn, 0, 0, 0, 0);
                 if (rc < 0) {
                     //
                     // TLS failed! Error logged, raw connection close initiated and error condition set. Clean up in
                     // DISCONNECTED raw connection event.
                     //
                     set_state_XSIDE_IO(conn, XSIDE_CLOSING);  // prevent further connection I/O
-                } else if (qd_tls_is_secure(conn->tls)) {
+                } else if (qd_tls2_session_is_secure(conn->tls_session)) {
                     //
                     // Handshake completed, begin the setup of the inbound and outbound links for this connection.
                     //
@@ -1713,7 +1721,7 @@ static void connection_run_LSIDE_IO(qd_tcp_connection_t *conn)
             // LSIDE_FLOW state and let the streaming begin.
             //
             if (!!conn->outbound_stream) {
-                set_state_XSIDE_IO(conn, (conn->tls) ? LSIDE_TLS_FLOW: LSIDE_FLOW);
+                set_state_XSIDE_IO(conn, (conn->tls_session) ? LSIDE_TLS_FLOW: LSIDE_FLOW);
                 repeat = true;
             }
             break;
@@ -1762,7 +1770,7 @@ static void connection_run_CSIDE_IO(qd_tcp_connection_t *conn)
                 if (connector->tls_domain) {
                     assert(conn->outbound_stream);
                     char *alpn = get_tls_negotiated_alpn(conn->outbound_stream);
-                    int rc = setup_tls_session(conn, connector->tls_domain, alpn);
+                    int rc = setup_tls_session(conn, connector->tls_domain, alpn, connector->adaptor_config->host);
                     free(alpn);
                     if (rc != 0) {
                         // TLS setup failed: check logs for details
@@ -1781,7 +1789,7 @@ static void connection_run_CSIDE_IO(qd_tcp_connection_t *conn)
 
             if (credit) {
                 compose_and_send_server_stream_CSIDE_IO(conn);
-                set_state_XSIDE_IO(conn, (conn->tls) ? CSIDE_TLS_FLOW : CSIDE_FLOW);
+                set_state_XSIDE_IO(conn, (conn->tls_session) ? CSIDE_TLS_FLOW : CSIDE_FLOW);
                 repeat = true;
             }
             break;
@@ -1868,20 +1876,22 @@ static uint64_t validate_outbound_message(const qdr_delivery_t *out_dlv)
 
 // Callback from TLS I/O handler when the TLS handshake succeeds
 //
-static void on_tls_connection_secured(qd_tls_t *tls, void *user_context)
+static void on_tls_connection_secured(qd_tls2_session_t *tls_session, void *user_context)
 {
     qd_tcp_connection_t *conn = (qd_tcp_connection_t *) user_context;
     assert(conn);
 
     qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG, "[C%"PRIu64"] TLS handshake succeeded!", conn->conn_id);
     if (conn->core_conn && conn->core_conn->connection_info) {
-        qd_tls_update_connection_info(conn->tls, conn->core_conn->connection_info);
+        char *p_version = qd_tls2_session_get_protocol_version(conn->tls_session);
+        char *p_ciphers = qd_tls2_session_get_protocol_ciphers(conn->tls_session);
+        qdr_connection_info_set_tls(conn->core_conn->connection_info, true, p_version, p_ciphers);
     }
 
     // check if we need to propagate client ALPN to server
     if (conn->listener_side) {
         assert(!conn->alpn_protocol);
-        qd_tls_get_alpn_protocol(conn->tls, &conn->alpn_protocol);
+        conn->alpn_protocol = qd_tls2_session_get_alpn_protocol(conn->tls_session);
     }
 }
 
@@ -1905,7 +1915,7 @@ static char *get_tls_negotiated_alpn(qd_message_t *msg)
                 break;
             }
             qd_iterator_t *key_iter = qd_parse_raw(key);
-            if (!!key_iter && qd_iterator_equal(key_iter, (const unsigned char *) QD_TLS_ALPN_KEY)) {
+            if (!!key_iter && qd_iterator_equal(key_iter, (const unsigned char *) ALPN_KEY)) {
                 qd_parsed_field_t *alpn_field = qd_parse_sub_value(ap, i);
                 qd_iterator_t     *alpn_iter  = qd_parse_raw(alpn_field);
                 alpn_protocol                 = (char *) qd_iterator_copy(alpn_iter);
@@ -1926,24 +1936,21 @@ static char *get_tls_negotiated_alpn(qd_message_t *msg)
  *
  * @return 0 on success, non-zero on error
  */
-static int setup_tls_session(qd_tcp_connection_t *conn, const qd_tls_domain_t *parent_domain, const char *alpn_protocol)
+static int setup_tls_session(qd_tcp_connection_t *conn, qd_tls2_domain_t *parent_domain,
+                             const char *alpn_protocol, const char *peer_hostname)
 {
-    conn->tls_domain = qd_tls_domain_clone(parent_domain);
-    if (!conn->tls_domain)
-        return -1;  // error logged in qd_tls_domain_clone()
+    size_t alpn_count = 0;
+    const char *alpn_protocols[1] = {0};
 
     if (alpn_protocol) {
-        const char *alpn_protocols[] = {alpn_protocol};
-        int rc = qd_tls_set_alpn_protocols(conn->tls_domain, alpn_protocols, 1);
-        if (rc != 0) {
-            qd_log(LOG_TCP_ADAPTOR, QD_LOG_ERROR,
-                   "[%" PRIu64 "] failed to configure ALPN protocol '%s' (%d)", conn->conn_id, alpn_protocol, rc);
-            return -1;
-        }
+        alpn_count = 1;
+        alpn_protocols[0] = alpn_protocol;
     }
 
-    conn->tls = qd_tls(conn->tls_domain, conn, conn->conn_id, on_tls_connection_secured);
-    if (!conn->tls)
+    conn->tls_session = qd_tls2_domain_new_session(parent_domain, conn->conn_id, peer_hostname,
+                                                   alpn_count ? alpn_protocols : 0, alpn_count,
+                                                   (void *) conn, on_tls_connection_secured);
+    if (!conn->tls_session)
         return -1;  // error logged in qd_tls()
 
     return 0;
@@ -2329,25 +2336,22 @@ QD_EXPORT void *qd_dispatch_configure_tcp_listener(qd_dispatch_t *qd, qd_entity_
 
     if (listener->adaptor_config->ssl_profile_name) {
         // On the TCP TLS listener side, send "http/1.1", "http/1.0" and "h2" as ALPN protocols
-        listener->tls_domain = qd_tls_domain(listener->adaptor_config, qd, LOG_TCP_ADAPTOR, tcp_alpn_protocols,
-                                       TCP_NUM_ALPN_PROTOCOLS, true);
+        listener->tls_domain = qd_tls2_new_domain(listener->adaptor_config->name,
+                                                  listener->adaptor_config->ssl_profile_name,
+                                                  QD_TLS_TYPE_PROTON_RAW,
+                                                  QD_TLS_DOMAIN_SERVER_MODE,
+                                                  listener->adaptor_config->verify_host_name,
+                                                  listener->adaptor_config->authenticate_peer,
+                                                  tcp_alpn_protocols, TCP_NUM_ALPN_PROTOCOLS,
+                                                  LOG_TCP_ADAPTOR);
         if (!listener->tls_domain) {
-            // note qd_tls_domain logged the error
+            qd_log(LOG_TCP_ADAPTOR, QD_LOG_ERROR,
+                   "tcpListener %s TLS configuration failed (sslProfile '%s')",
+                   listener->adaptor_config->name, listener->adaptor_config->ssl_profile_name);
             qd_free_adaptor_config(listener->adaptor_config);
             free_qd_tcp_listener_t(listener);
             return 0;
         }
-
-        // sanity check the configuration by creating a temporary TLS session. Is this fails
-        // an error will be logged by the call to qd_tls()
-        qd_tls_t *test = qd_tls(listener->tls_domain, 0, 0, 0);
-        if (!test) {
-            qd_free_adaptor_config(listener->adaptor_config);
-            qd_tls_domain_decref(listener->tls_domain);
-            free_qd_tcp_listener_t(listener);
-            return 0;
-        }
-        qd_tls_free2(test);
     }
 
     qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO,
@@ -2469,24 +2473,21 @@ qd_tcp_connector_t *qd_dispatch_configure_tcp_connector(qd_dispatch_t *qd, qd_en
     }
 
     if (connector->adaptor_config->ssl_profile_name) {
-        connector->tls_domain = qd_tls_domain(connector->adaptor_config, qd, LOG_TCP_ADAPTOR, 0, 0, false);
+        connector->tls_domain = qd_tls2_new_domain(connector->adaptor_config->name,
+                                                   connector->adaptor_config->ssl_profile_name,
+                                                   QD_TLS_TYPE_PROTON_RAW,
+                                                   QD_TLS_DOMAIN_CLIENT_MODE,
+                                                   connector->adaptor_config->verify_host_name,
+                                                   connector->adaptor_config->authenticate_peer,
+                                                   0, 0, LOG_TCP_ADAPTOR);
         if (!connector->tls_domain) {
-            // note qd_tls_domain() logged the error
+            qd_log(LOG_TCP_ADAPTOR, QD_LOG_ERROR,
+                   "tcpConnector %s TLS configuration failed (sslProfile '%s')",
+                   connector->adaptor_config->name, connector->adaptor_config->ssl_profile_name);
             qd_free_adaptor_config(connector->adaptor_config);
             free_qd_tcp_connector_t(connector);
             return 0;
         }
-
-        // sanity check the configuration by creating a temporary TLS session. Is this fails
-        // an error will be logged by the call to qd_tls()
-        qd_tls_t *test = qd_tls(connector->tls_domain, 0, 0, 0);
-        if (!test) {
-            qd_free_adaptor_config(connector->adaptor_config);
-            qd_tls_domain_decref(connector->tls_domain);
-            free_qd_tcp_connector_t(connector);
-            return 0;
-        }
-        qd_tls_free2(test);
     }
 
     connector->activate_timer = qd_timer(tcp_context->qd, on_core_activate_TIMER_IO, connector);

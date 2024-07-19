@@ -41,100 +41,13 @@
 
 #define CHECK() if (qd_error_code()) goto error
 
-DEQ_DECLARE(qd_config_ssl_profile_t, qd_config_ssl_profile_list_t);
-
 struct qd_connection_manager_t {
     qd_server_t                  *server;
     qd_listener_list_t            listeners;
     qd_connector_list_t           connectors;
     qd_connector_list_t           data_connectors;
-    qd_config_ssl_profile_list_t  config_ssl_profiles;
 };
 
-
-/**
- * Search the list of config_ssl_profiles for an ssl-profile that matches the passed in name
- */
-qd_config_ssl_profile_t *qd_find_ssl_profile(const qd_connection_manager_t *cm, const char *ssl_profile_name)
-{
-    qd_config_ssl_profile_t *ssl_profile = DEQ_HEAD(cm->config_ssl_profiles);
-    while (ssl_profile) {
-        if (strcmp(ssl_profile->name, ssl_profile_name) == 0)
-            return ssl_profile;
-        ssl_profile = DEQ_NEXT(ssl_profile);
-    }
-
-    return 0;
-}
-
-
-static bool config_ssl_profile_free(qd_connection_manager_t *cm, qd_config_ssl_profile_t *ssl_profile)
-{
-    DEQ_REMOVE(cm->config_ssl_profiles, ssl_profile);
-
-    free(ssl_profile->name);
-    free(ssl_profile->ssl_password);
-    free(ssl_profile->ssl_trusted_certificate_db);
-    free(ssl_profile->ssl_uid_format);
-    free(ssl_profile->uid_name_mapping_file);
-    free(ssl_profile->ssl_certificate_file);
-    free(ssl_profile->ssl_private_key_file);
-    free(ssl_profile->ssl_ciphers);
-    free(ssl_profile->ssl_protocols);
-    free(ssl_profile);
-    return true;
-
-}
-
-
-QD_EXPORT qd_config_ssl_profile_t *qd_dispatch_configure_ssl_profile(qd_dispatch_t *qd, qd_entity_t *entity)
-{
-    qd_error_clear();
-    qd_connection_manager_t *cm = qd->connection_manager;
-
-    qd_config_ssl_profile_t *ssl_profile = NEW(qd_config_ssl_profile_t);
-    ZERO(ssl_profile);
-    DEQ_ITEM_INIT(ssl_profile);
-    DEQ_INSERT_TAIL(cm->config_ssl_profiles, ssl_profile);
-    ssl_profile->name                       = qd_entity_opt_string(entity, "name", 0); CHECK();
-    ssl_profile->ssl_certificate_file       = qd_entity_opt_string(entity, "certFile", 0); CHECK();
-    ssl_profile->ssl_private_key_file       = qd_entity_opt_string(entity, "privateKeyFile", 0); CHECK();
-    ssl_profile->ssl_password               = qd_entity_opt_string(entity, "password", 0); CHECK();
-
-    if (ssl_profile->ssl_password) {
-        //
-        // Process the password to handle any modifications or lookups needed
-        //
-        char *actual_pass = 0;
-        bool is_file_path = 0;
-        qd_server_config_process_password(&actual_pass, ssl_profile->ssl_password, &is_file_path, true);
-        CHECK();
-        if (actual_pass) {
-            if (is_file_path) {
-                qd_set_password_from_file(actual_pass, &ssl_profile->ssl_password);
-                free(actual_pass);
-            }
-            else {
-                free(ssl_profile->ssl_password);
-                ssl_profile->ssl_password = actual_pass;
-            }
-        }
-    }
-
-    ssl_profile->ssl_ciphers   = qd_entity_opt_string(entity, "ciphers", 0);                   CHECK();
-    ssl_profile->ssl_protocols = qd_entity_opt_string(entity, "protocols", 0);                 CHECK();
-    ssl_profile->ssl_trusted_certificate_db = qd_entity_opt_string(entity, "caCertFile", 0);   CHECK();
-    ssl_profile->ssl_uid_format             = qd_entity_opt_string(entity, "uidFormat", 0);          CHECK();
-    ssl_profile->uid_name_mapping_file      = qd_entity_opt_string(entity, "uidNameMappingFile", 0); CHECK();
-
-    qd_log(LOG_CONN_MGR, QD_LOG_INFO, "Created SSL Profile with name %s ", ssl_profile->name);
-    return ssl_profile;
-
-    error:
-    qd_log(LOG_CONN_MGR, QD_LOG_ERROR, "Unable to create ssl profile: %s", qd_error_message());
-    config_ssl_profile_free(cm, ssl_profile);
-    return 0;
-}
 
 static void log_config(qd_server_config_t *c, const char *what, bool create)
 {
@@ -469,7 +382,6 @@ qd_connection_manager_t *qd_connection_manager(qd_dispatch_t *qd)
     DEQ_INIT(cm->listeners);
     DEQ_INIT(cm->connectors);
     DEQ_INIT(cm->data_connectors);
-    DEQ_INIT(cm->config_ssl_profiles);
 
     return cm;
 }
@@ -517,13 +429,6 @@ void qd_connection_manager_free(qd_connection_manager_t *cm)
 
         connector = DEQ_HEAD(to_free);
     }
-
-    qd_config_ssl_profile_t *sslp = DEQ_HEAD(cm->config_ssl_profiles);
-    while (sslp) {
-        config_ssl_profile_free(cm, sslp);
-        sslp = DEQ_HEAD(cm->config_ssl_profiles);
-    }
-
 
     free(cm);
 }
@@ -594,15 +499,6 @@ QD_EXPORT void qd_connection_manager_delete_listener(qd_dispatch_t *qd, void *im
     }
 }
 
-
-QD_EXPORT void qd_connection_manager_delete_ssl_profile(qd_dispatch_t *qd, void *impl)
-{
-    qd_config_ssl_profile_t *ssl_profile = (qd_config_ssl_profile_t*) impl;
-
-    qd_log(LOG_CONN_MGR, QD_LOG_INFO, "Deleted SSL Profile with name %s ", ssl_profile->name);
-
-    config_ssl_profile_free(qd->connection_manager, ssl_profile);
-}
 
 static void deferred_close(void *context, bool discard) {
     if (!discard) {

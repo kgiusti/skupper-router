@@ -37,6 +37,7 @@
 #include "qpid/dispatch/discriminator.h"
 #include "qpid/dispatch/server.h"
 #include "qpid/dispatch/static_assert.h"
+#include "qpid/dispatch/tls.h"
 
 #include <dlfcn.h>
 #include <inttypes.h>
@@ -116,6 +117,7 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir, bool test_hooks)
     qd_entity_cache_initialize();   /* Must be first */
     qd_alloc_initialize();
     qd_log_initialize();
+    qd_tls2_initialize();
     qd_error_initialize();
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
 
@@ -393,6 +395,7 @@ void qd_dispatch_free(qd_dispatch_t *qd)
     Py_XDECREF((PyObject*) qd->agent);
     qd_router_free(qd->router);
     qd_server_free(qd->server);
+    qd_tls2_finalize();
     qd_log_finalize();
     qd_alloc_finalize();
     qd_python_finalize();

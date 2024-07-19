@@ -617,10 +617,10 @@ class RouterConfigTest(TestCase):
         self.routers[12].wait_log_message(err, self.routers[12].outfile + '.out', timeout=1.0)
         self.routers[13].wait_log_message(err, self.routers[13].outfile + '.out', timeout=1.0)
 
-        err = "Adaptor connector tcpConnector/127.0.0.1:9999 configuration error: failed to find sslProfile 'DoesNotExist'"
+        err = "sslProfile 'DoesNotExist' not found"
         self.routers[18].wait_log_message(err, timeout=1.0)
 
-        err = "Adaptor listener tcpListener/0.0.0.0:9999 configuration error: failed to find sslProfile 'DoesNotExist'"
+        err = "sslProfile 'DoesNotExist' not found"
         self.routers[19].wait_log_message(err, timeout=1.0)
 
         err = "Adaptor connector httpConnector/127.0.0.1:9999 configuration error: failed to find sslProfile 'DoesNotExist'"

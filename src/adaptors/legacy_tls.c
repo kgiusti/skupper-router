@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include "adaptor_tls.h"
+#include "legacy_tls.h"
 
 #include "router_core_private.h"
 
@@ -25,6 +25,7 @@
 #include "qpid/dispatch/atomic.h"
 #include "qpid/dispatch/connection_manager.h"
 #include "qpid/dispatch/ctools.h"
+#include "qpid/dispatch/tls.h"
 
 #include <proton/tls.h>
 
@@ -229,12 +230,12 @@ qd_tls_domain_t *qd_tls_domain_clone(const qd_tls_domain_t *src)
 static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
 {
     const char *role = tls_domain->is_listener ? "listener" : "connector";
+    qd_ssl2_profile_t tmp = {0};
+    qd_ssl2_profile_t *config_ssl_profile = 0;
 
     do {
         // find the ssl profile
-        qd_connection_manager_t *cm = qd_dispatch_connection_manager(tls_domain->qd_dispatch);
-        assert(cm);
-        qd_config_ssl_profile_t *config_ssl_profile = qd_find_ssl_profile(cm, tls_domain->ssl_profile_name);
+        config_ssl_profile = qd_tls2_read_ssl_profile(tls_domain->ssl_profile_name, &tmp);
         if (!config_ssl_profile) {
             qd_log(tls_domain->log_module,
                    QD_LOG_ERROR,
@@ -363,6 +364,8 @@ static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
             }
         }
 
+        qd_tls2_cleanup_ssl_profile(config_ssl_profile);
+
         qd_log(tls_domain->log_module,
                QD_LOG_INFO,
                "Adaptor %s %s successfully configured sslProfile %s",
@@ -375,6 +378,7 @@ static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
 
     // If we get here, the configuration setup failed
 
+    qd_tls2_cleanup_ssl_profile(config_ssl_profile);
     qd_tls_domain_decref(tls_domain);
     return 0;
 }

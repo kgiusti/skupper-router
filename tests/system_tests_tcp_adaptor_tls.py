@@ -17,11 +17,11 @@
 # under the License.
 #
 import os
-import shutil
 from system_test import unittest, TestCase, Qdrouterd, NcatException, Logger, Process, run_curl, \
     CA_CERT, CLIENT_CERTIFICATE, CLIENT_PRIVATE_KEY, CLIENT_PRIVATE_KEY_PASSWORD, \
     SERVER_CERTIFICATE, SERVER_PRIVATE_KEY, SERVER_PRIVATE_KEY_PASSWORD, SERVER_PRIVATE_KEY_NO_PASS, BAD_CA_CERT, \
     CHAINED_CERT
+from system_test import SSL_PROFILE_TYPE
 from system_tests_ssl import RouterTestSslBase
 from system_tests_tcp_adaptor import TcpAdaptorBase, CommonTcpTests, ncat_available
 from http1_tests import wait_tcp_listeners_up
@@ -735,26 +735,16 @@ class HttpOverTcpTestTlsTwoRouterNginx(RouterTestSslBase):
         self.assertEqual(digest_of_server_file, digest_of_response_file)
 
 
-class TcpAdaptorCertCorruptionTests(TestCase):
+class TcpAdaptorSslProfileUpdateTests(TestCase):
     """
-    The TCP adaptor re-loads the certificate files every time a new client or
-    server TCP connection is created. This test verifies that the router can
-    handle the case where the certificate files are removed or corrupted while
-    new connections are created.
+    Verify that management updates to a tcpListener/Connector's sslProfile are
+    adopted for new connections.
     """
     @classmethod
     def setUpClass(cls):
-        super(TcpAdaptorCertCorruptionTests, cls).setUpClass()
+        super(TcpAdaptorSslProfileUpdateTests, cls).setUpClass()
         cls.openssl_server_listening_port = cls.tester.get_port()
         cls.router_listener_port = cls.tester.get_port()
-
-        # make a local copy of the client and server certificates. This test
-        # destroys these files, so we do not want to destroy the originals!
-
-        cls.server_cert_file = shutil.copy(SERVER_CERTIFICATE,
-                                           os.path.dirname(os.getcwd()))
-        cls.client_cert_file = shutil.copy(CLIENT_CERTIFICATE,
-                                           os.path.dirname(os.getcwd()))
 
         # Set up two routers, TCP listener on one, connector on another
 
@@ -766,11 +756,11 @@ class TcpAdaptorCertCorruptionTests(TestCase):
             ('listener', {'role': 'inter-router', 'port': inter_router_port}),
             ('sslProfile', {'name': 'listener-ssl-profile',
                             'caCertFile': CA_CERT,
-                            'certFile': cls.server_cert_file,
+                            'certFile': SERVER_CERTIFICATE,
                             'privateKeyFile': SERVER_PRIVATE_KEY,
                             'password': SERVER_PRIVATE_KEY_PASSWORD}),
             ('tcpListener', {'port': cls.router_listener_port,
-                             'address': 'corrupt/me',
+                             'address': 'update/me',
                              'host': 'localhost',
                              'authenticatePeer': 'yes',
                              'sslProfile': 'listener-ssl-profile'})
@@ -783,11 +773,11 @@ class TcpAdaptorCertCorruptionTests(TestCase):
                            'port': inter_router_port}),
             ('sslProfile', {'name': 'connector-ssl-profile',
                             'caCertFile': CA_CERT,
-                            'certFile': cls.client_cert_file,
+                            'certFile': CLIENT_CERTIFICATE,
                             'privateKeyFile': CLIENT_PRIVATE_KEY,
                             'password': CLIENT_PRIVATE_KEY_PASSWORD}),
             ('tcpConnector', {'port': cls.openssl_server_listening_port,
-                              'address': 'corrupt/me',
+                              'address': 'update/me',
                               'host': 'localhost',
                               'verifyHostname': 'yes',
                               'sslProfile': 'connector-ssl-profile'}),
@@ -799,8 +789,8 @@ class TcpAdaptorCertCorruptionTests(TestCase):
         cls.router_qdrb.wait_router_connected('QDR.A')
         wait_tcp_listeners_up(cls.router_qdra.addresses[0])
 
-    def test_cert_corruption(self):
-        # Note we do not want to corrupt the certs held by the ssl server or
+    def test_ssl_profile_update(self):
+        # Note we do not want to update the certs held by the ssl server or
         # client. We need them to be valid so the test client/server do not
         # fail themselves. We only want the router to be affected!
 
@@ -831,38 +821,53 @@ class TcpAdaptorCertCorruptionTests(TestCase):
         self.openssl_server.wait_out_message("Sanity Check the Configuration!")
 
         #
-        # Phase 1: corrupt the server-facing certificate
+        # Attempt to update the listener-side sslProfile with the wrong
+        # password.  This should cause new client connections to fail due to
+        # the configuration error.
         #
 
-        with open(self.client_cert_file, mode="w") as clientf:
-            clientf.write("Oh mercy! I'm corrupt!")
+        skmgr_a = self.router_qdra.sk_manager
+        l_id = skmgr_a.read(name='listener-ssl-profile')['identity']
+
+        with self.assertRaises(Exception) as emgr:
+            skmgr_a.update(SSL_PROFILE_TYPE, {'password': 'badpassword'}, identity=l_id)
+
+        self.assertIn('sslProfile configuration update failed', str(emgr.exception))
+
+        #
+        # Restore the proper password and verify clients can connect
+        #
+
+        skmgr_a.update(SSL_PROFILE_TYPE, {'password': SERVER_PRIVATE_KEY_PASSWORD}, identity=l_id)
+
+        out = skmgr_a.read(name='listener-ssl-profile')
+        self.assertEqual(SERVER_PRIVATE_KEY_PASSWORD, out['password'])
+
+        out, error = self.opensslclient(port=self.router_listener_port,
+                                        ssl_info=client_ssl_info,
+                                        data=b"Hey password is good!")
+        self.assertIn(b"Verification: OK", out)
+        self.assertIn(b"Verify return code: 0 (ok)", out)
+
+        self.openssl_server.wait_out_message("Hey password is good!")
+
+        #
+        # Now update the sslProfile with a valid config, but one that will not
+        # allow the client to connect
+        #
+
+        skmgr_a.update(SSL_PROFILE_TYPE, {'caCertFile': BAD_CA_CERT}, identity=l_id)
 
         _, _ = self.opensslclient(port=self.router_listener_port,
                                   ssl_info=client_ssl_info,
-                                  data=b"Phase 1")
-        self.router_qdrb.wait_log_message(r'failed to set TLS certificate')
+                                  data=b"The CA will not allow this!")
+        self.router_qdra.wait_log_message(r'TLS connection failed')
 
         #
-        # Phase 2: corrupt the client-facing certificate
+        # Restore the sslProfile configuration and verify all is well
         #
 
-        with open(self.server_cert_file, mode="w") as serverf:
-            serverf.write("Alas! I too have been rendered corrupt!")
-
-        _, _ = self.opensslclient(port=self.router_listener_port,
-                                  ssl_info=client_ssl_info,
-                                  data=b"Phase 2",
-                                  expect=Process.EXIT_FAIL)
-        self.router_qdra.wait_log_message(r'failed to set TLS certificate')
-
-        #
-        # Phase 3: Restore the files and verify all is well
-        #
-
-        self.server_cert_file = shutil.copy(SERVER_CERTIFICATE,
-                                            os.path.dirname(os.getcwd()))
-        self.client_cert_file = shutil.copy(CLIENT_CERTIFICATE,
-                                            os.path.dirname(os.getcwd()))
+        skmgr_a.update(SSL_PROFILE_TYPE, {'caCertFile': CA_CERT}, identity=l_id)
 
         out, error = self.opensslclient(port=self.router_listener_port,
                                         ssl_info=client_ssl_info,

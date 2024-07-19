@@ -26,6 +26,7 @@
 #include "entity.h"
 
 #include <qpid/dispatch/log.h>
+#include <qpid/dispatch/tls.h>
 
 #include <proton/codec.h>
 
@@ -37,7 +38,7 @@
 
 // FIXME: I cannot justify this - never call goto from a MACRO!
 #define CHECK() if (qd_error_code()) goto error
-#define SSTRDUP(S) ((S) ? strdup(S) : NULL)
+#define CHECKED_STRDUP(S) ((S) ? qd_strdup(S) : NULL)
 
 
 /**
@@ -254,18 +255,20 @@ qd_error_t qd_server_config_load(qd_dispatch_t *qd, qd_server_config_t *config, 
         config->ssl_require_peer_authentication = config->sasl_mechanisms &&
             strstr(config->sasl_mechanisms, "EXTERNAL") != 0;
 
-        qd_config_ssl_profile_t *ssl_profile =
-            qd_find_ssl_profile(qd->connection_manager, config->ssl_profile);
-        if (ssl_profile) {
-            config->ssl_certificate_file = SSTRDUP(ssl_profile->ssl_certificate_file);
-            config->ssl_private_key_file = SSTRDUP(ssl_profile->ssl_private_key_file);
-            config->ssl_ciphers = SSTRDUP(ssl_profile->ssl_ciphers);
-            config->ssl_protocols = SSTRDUP(ssl_profile->ssl_protocols);
-            config->ssl_password = SSTRDUP(ssl_profile->ssl_password);
-            config->ssl_trusted_certificate_db = SSTRDUP(ssl_profile->ssl_trusted_certificate_db);
-            config->ssl_uid_format = SSTRDUP(ssl_profile->ssl_uid_format);
-            config->ssl_uid_name_mapping_file = SSTRDUP(ssl_profile->uid_name_mapping_file);
+        qd_ssl2_profile_t ssl_profile;
+        if (qd_tls2_read_ssl_profile(config->ssl_profile, &ssl_profile) == 0) {
+            qd_error(QD_ERROR_NOT_FOUND, "sslProfile '%s' not found", config->ssl_profile);
+            goto error;
         }
+        config->ssl_certificate_file       = CHECKED_STRDUP(ssl_profile.ssl_certificate_file);
+        config->ssl_private_key_file       = CHECKED_STRDUP(ssl_profile.ssl_private_key_file);
+        config->ssl_ciphers                = CHECKED_STRDUP(ssl_profile.ssl_ciphers);
+        config->ssl_protocols              = CHECKED_STRDUP(ssl_profile.ssl_protocols);
+        config->ssl_password               = CHECKED_STRDUP(ssl_profile.ssl_password);
+        config->ssl_trusted_certificate_db = CHECKED_STRDUP(ssl_profile.ssl_trusted_certificate_db);
+        config->ssl_uid_format             = CHECKED_STRDUP(ssl_profile.ssl_uid_format);
+        config->ssl_uid_name_mapping_file  = CHECKED_STRDUP(ssl_profile.uid_name_mapping_file);
+        qd_tls2_cleanup_ssl_profile(&ssl_profile);
     }
 
     return QD_ERROR_NONE;

@@ -239,6 +239,29 @@ void qdr_connection_info_set_group_correlator(qdr_connection_info_t *info, const
 }
 
 
+void qdr_connection_info_set_tls(qdr_connection_info_t *conn_info, bool enabled, char *version, char *ciphers)
+{
+    //
+    // Lock using the connection_info_lock before setting the values on the
+    // connection_info. This same lock is being used in the agent_connection.c's qdr_connection_insert_column_CT
+    //
+    sys_mutex_lock(&conn_info->connection_info_lock);
+    free(conn_info->ssl_cipher);
+    free(conn_info->ssl_proto);
+    conn_info->ssl = enabled;
+    conn_info->is_encrypted = enabled;
+    if (enabled) {
+        conn_info->ssl_proto  = version;
+        conn_info->ssl_cipher = ciphers;
+    } else {
+        assert(!version && !ciphers);
+        conn_info->ssl_cipher = 0;
+        conn_info->ssl_proto  = 0;
+    }
+    sys_mutex_unlock(&conn_info->connection_info_lock);
+}
+
+
 static void qdr_connection_info_free(qdr_connection_info_t *ci)
 {
     free(ci->container);
