@@ -2375,6 +2375,11 @@ static void qd_amqp_adaptor_init(qdr_core_t *core, void **adaptor_context)
 
 static void qd_amqp_adaptor_final(void *adaptor_context)
 {
+    extern _Atomic int kag_count;
+    extern _Atomic qd_duration_t kag_time;
+    extern _Atomic int kag2_count;
+    extern _Atomic qd_duration_t kag2_time;
+
     qd_connection_list_t conn_list = DEQ_EMPTY;
 
     sys_mutex_lock(&amqp_adaptor.lock);
@@ -2423,6 +2428,17 @@ static void qd_amqp_adaptor_final(void *adaptor_context)
     qd_container_free(amqp_adaptor.container);
 
     memset(&amqp_adaptor, 0, sizeof(amqp_adaptor));
+
+    if (kag_count) {
+        fprintf(stdout, "AMQP: COUNT=%d TOTAL=%" PRId64 " AVG=%" PRId64"\n",
+                kag_count, kag_time, kag_time / kag_count);
+    }
+
+    if (kag2_count) {
+        fprintf(stdout, "RAW: COUNT=%d TOTAL=%" PRId64 " AVG=%" PRId64"\n",
+                kag2_count, kag2_time, kag2_time / kag2_count);
+    }
+    
 }
 
 QDR_CORE_ADAPTOR_DECLARE("amqp", qd_amqp_adaptor_init, qd_amqp_adaptor_final)

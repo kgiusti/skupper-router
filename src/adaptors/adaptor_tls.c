@@ -226,6 +226,9 @@ qd_tls_domain_t *qd_tls_domain_clone(const qd_tls_domain_t *src)
     return _tls_domain_init(tls_domain);
 }
 
+_Atomic int kag2_count;
+_Atomic qd_duration_t kag2_time;
+
 static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
 {
     const char *role = tls_domain->is_listener ? "listener" : "connector";
@@ -244,6 +247,8 @@ static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
                    tls_domain->ssl_profile_name);
             break;
         }
+
+        qd_timestamp_t start = qd_timer_now();
 
         int res                   = -1;  // assume failure
         tls_domain->pn_tls_config = pn_tls_config(tls_domain->is_listener ? PN_TLS_MODE_SERVER : PN_TLS_MODE_CLIENT);
@@ -362,6 +367,9 @@ static qd_tls_domain_t *_tls_domain_init(qd_tls_domain_t *tls_domain)
                 break;
             }
         }
+
+        kag2_count += 1;
+        kag2_time += qd_timer_now() - start;
 
         qd_log(tls_domain->log_module,
                QD_LOG_INFO,

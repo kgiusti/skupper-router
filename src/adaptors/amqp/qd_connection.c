@@ -742,9 +742,13 @@ uint64_t qd_connection_max_message_size(const qd_connection_t *c)
     return (c && c->policy_settings) ? c->policy_settings->spec.maxMessageSize : 0;
 }
 
+_Atomic int kag_count;
+_Atomic qd_duration_t kag_time;
 
 static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_config_t *config, pn_transport_t *tport)
 {
+    qd_timestamp_t start = qd_timer_now();
+
     pn_ssl_domain_t *domain = pn_ssl_domain(PN_SSL_MODE_SERVER);
     if (!domain) return qd_error(QD_ERROR_RUNTIME, "No SSL support");
 
@@ -801,6 +805,10 @@ static qd_error_t listener_setup_ssl(qd_connection_t *ctx, const qd_server_confi
     }
 
     pn_ssl_domain_free(domain);
+
+    kag_count += 1;
+    kag_time += qd_timer_now() - start;
+
     return QD_ERROR_NONE;
 }
 
@@ -856,6 +864,9 @@ static bool setup_ssl_sasl_and_open(qd_connection_t *ctx)
     // Set up SSL if appropriate
     //
     if (config->ssl_profile) {
+
+        qd_timestamp_t start = qd_timer_now();
+
         pn_ssl_domain_t *domain = pn_ssl_domain(PN_SSL_MODE_CLIENT);
 
         if (!domain) {
@@ -941,6 +952,8 @@ static bool setup_ssl_sasl_and_open(qd_connection_t *ctx)
             return false;
         }
 
+        kag_count += 1;
+        kag_time += qd_timer_now() - start;
     }
 
     //
