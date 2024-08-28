@@ -140,7 +140,8 @@ static const char thread_names[SYS_THREAD_ROLE_COUNT][SYS_THREAD_NAME_MAX + 1] =
     "core_thread",   // SYS_THREAD_CORE
     "wrkr_",         // SYS_THREAD_PROACTOR (multiple)
     "vflow_thread",  // SYS_THREAD_VFLOW
-    "lws_thread"     // SYS_THREAD_LWS_HTTP
+    "lws_thread",    // SYS_THREAD_LWS_HTTP
+    "genwork_thread" // SYS_THREAD_GENERAL_WORK
 };
 
 static sys_atomic_t proactor_thread_count = 0;
@@ -381,10 +382,11 @@ char *test_threading_roles_names(void *context)
 
     // check non-proactor thread roles and names
 
-    sys_thread_role_t roles[3] = {
+    sys_thread_role_t roles[4] = {
         SYS_THREAD_CORE,
         SYS_THREAD_VFLOW,
         SYS_THREAD_LWS_HTTP,
+        SYS_THREAD_GENERAL_WORK
     };
 
     for (int i = 0; i < 3; i++) {

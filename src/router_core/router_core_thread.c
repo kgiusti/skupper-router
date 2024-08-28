@@ -21,6 +21,7 @@
 #include "router_core_private.h"
 
 #include "qpid/dispatch/protocol_adaptor.h"
+#include "qpid/dispatch/general_work.h"
 
 /**
  * Creates a thread that is dedicated to managing and using the routing table.
@@ -103,19 +104,22 @@ static void qdr_activate_connections_CT(qdr_core_t *core)
 }
 
 
-static void qdr_do_message_to_addr_free(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+// Runs on the general work thread
+//
+static void qdr_do_message_to_addr_free(void *context, void *args, bool discard)
 {
     // safe to ignore discard flag since this handler simply frees resources
-    qdr_delivery_cleanup_t *cleanup = DEQ_HEAD(work->delivery_cleanup_list);
+    qdr_delivery_cleanup_list_t *cleanup_list = (qdr_delivery_cleanup_list_t *) args;
+    qdr_delivery_cleanup_t *cleanup = DEQ_HEAD(*cleanup_list);
 
     while (cleanup) {
-        DEQ_REMOVE_HEAD(work->delivery_cleanup_list);
+        DEQ_REMOVE_HEAD(*cleanup_list);
         if (cleanup->msg)
             qd_message_free(cleanup->msg);
         if (cleanup->iter)
             qd_iterator_free(cleanup->iter);
         free_qdr_delivery_cleanup_t(cleanup);
-        cleanup = DEQ_HEAD(work->delivery_cleanup_list);
+        cleanup = DEQ_HEAD(*cleanup_list);
     }
 }
 
@@ -263,9 +267,12 @@ void *router_core_thread(void *arg)
         // Schedule the cleanup of deliveries freed during this core-thread pass
         //
         if (DEQ_SIZE(core->delivery_cleanup_list) > 0) {
-            qdr_general_work_t *work = qdr_general_work(qdr_do_message_to_addr_free);
-            DEQ_MOVE(core->delivery_cleanup_list, work->delivery_cleanup_list);
-            qdr_post_general_work_CT(core, work);
+            qd_general_work_t *work = qd_general_work(0,
+                                                      qdr_do_message_to_addr_free,
+                                                      sizeof(qdr_delivery_cleanup_list_t));
+            qdr_delivery_cleanup_list_t *cleanup_list = (qdr_delivery_cleanup_list_t *) qd_general_work_args(work);
+            DEQ_MOVE(core->delivery_cleanup_list, *cleanup_list);
+            qd_post_general_work(work);
         }
     }
 

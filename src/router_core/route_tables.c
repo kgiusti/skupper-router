@@ -18,6 +18,7 @@
  */
 
 #include "router_core_private.h"
+#include "qpid/dispatch/general_work.h"
 
 static void qdr_add_router_CT          (qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_del_router_CT          (qdr_core_t *core, qdr_action_t *action, bool discard);
@@ -720,49 +721,73 @@ static void qdr_unsubscribe_CT(qdr_core_t *core, qdr_action_t *action, bool disc
 // Call-back Functions
 //==================================================================================
 
-static void qdr_do_set_mobile_seq(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+typedef struct callback_args_t callback_args_t;
+struct callback_args_t {
+    uint64_t mobile_seq;
+    int      maskbit;
+};
+
+static void qdr_do_set_mobile_seq(void *context, void *args, bool discard)
 {
+    qdr_core_t *core = (qdr_core_t *) context;
+    callback_args_t *cb_args = (callback_args_t *) args;
+
     if (!discard)
-        core->rt_set_mobile_seq(core->rt_context, work->maskbit, work->mobile_seq);
+        core->rt_set_mobile_seq(core->rt_context, cb_args->maskbit, cb_args->mobile_seq);
 }
 
 
-static void qdr_do_set_my_mobile_seq(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+static void qdr_do_set_my_mobile_seq(void *context, void *args, bool discard)
 {
+    qdr_core_t *core = (qdr_core_t *) context;
+    callback_args_t *cb_args = (callback_args_t *) args;
+
     if (!discard)
-        core->rt_set_my_mobile_seq(core->rt_context, work->mobile_seq);
+        core->rt_set_my_mobile_seq(core->rt_context, cb_args->mobile_seq);
 }
 
 
-static void qdr_do_link_lost(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+static void qdr_do_link_lost(void *context, void *args, bool discard)
 {
+    qdr_core_t *core = (qdr_core_t *) context;
+    callback_args_t *cb_args = (callback_args_t *) args;
+
     if (!discard)
-        core->rt_link_lost(core->rt_context, work->maskbit);
+        core->rt_link_lost(core->rt_context, cb_args->maskbit);
 }
 
 
 void qdr_post_set_mobile_seq_CT(qdr_core_t *core, int router_maskbit, uint64_t mobile_seq)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_set_mobile_seq);
-    work->mobile_seq = mobile_seq;
-    work->maskbit    = router_maskbit;
-    qdr_post_general_work_CT(core, work);
+    qd_general_work_t *work = qd_general_work(core,
+                                              qdr_do_set_mobile_seq,
+                                              sizeof(callback_args_t));
+    callback_args_t *args = (callback_args_t *) qd_general_work_args(work);
+    args->mobile_seq = mobile_seq;
+    args->maskbit    = router_maskbit;
+    qd_post_general_work(work);
 }
 
 
 void qdr_post_set_my_mobile_seq_CT(qdr_core_t *core, uint64_t mobile_seq)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_set_my_mobile_seq);
-    work->mobile_seq = mobile_seq;
-    qdr_post_general_work_CT(core, work);
+    qd_general_work_t *work = qd_general_work(core,
+                                              qdr_do_set_my_mobile_seq,
+                                              sizeof(callback_args_t));
+    callback_args_t *args = (callback_args_t *) qd_general_work_args(work);
+    args->mobile_seq = mobile_seq;
+    qd_post_general_work(work);
 }
 
 
 void qdr_post_link_lost_CT(qdr_core_t *core, int link_maskbit)
 {
-    qdr_general_work_t *work = qdr_general_work(qdr_do_link_lost);
-    work->maskbit = link_maskbit;
-    qdr_post_general_work_CT(core, work);
+    qd_general_work_t *work = qd_general_work(core,
+                                              qdr_do_link_lost,
+                                              sizeof(callback_args_t));
+    callback_args_t *args = (callback_args_t *) qd_general_work_args(work);
+    args->maskbit = link_maskbit;
+    qd_post_general_work(work);
 }
 
 

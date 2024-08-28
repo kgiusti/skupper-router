@@ -37,6 +37,7 @@
 #include "qpid/dispatch/discriminator.h"
 #include "qpid/dispatch/server.h"
 #include "qpid/dispatch/static_assert.h"
+#include "qpid/dispatch/general_work.h"
 
 #include <dlfcn.h>
 #include <inttypes.h>
@@ -139,6 +140,8 @@ qd_dispatch_t *qd_dispatch(const char *python_pkgdir, bool test_hooks)
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
     qd_message_initialize();
     if (qd_error_code()) { qd_dispatch_free(qd); return 0; }
+    qd_general_work_start();
+
     return qd;
 }
 
@@ -383,6 +386,9 @@ static void qd_dispatch_set_router_van_id(qd_dispatch_t *qd, char *_van_id) {
 void qd_dispatch_free(qd_dispatch_t *qd)
 {
     if (!qd) return;
+
+    // Stop the general work thread to prevent further callbacks
+    qd_general_work_stop();
 
     /* Stop HTTP threads immediately */
     qd_http_server_free(qd_server_http(qd->server));

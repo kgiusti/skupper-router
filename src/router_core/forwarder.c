@@ -21,6 +21,7 @@
 
 #include "delivery.h"
 #include "router_core_private.h"
+#include "qpid/dispatch/general_work.h"
 
 #include <inttypes.h>
 #include <strings.h>
@@ -363,40 +364,59 @@ static void qdr_settle_subscription_delivery_CT(qdr_core_t *core, qdr_action_t *
 }
 
 
-void qdr_forward_on_message(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+// Arguments to the qdr_forward_on_message() work handler
+//
+typedef struct qdr_forward_on_msg_args_t qdr_forward_on_msg_args_t;
+struct qdr_forward_on_msg_args_t {
+    qdr_receive_t           on_message;
+    void                   *on_message_context;
+    qd_message_t           *msg;
+    int                     maskbit;
+    int                     inter_router_cost;
+    uint64_t                in_conn_id;
+    const qd_policy_spec_t *policy_spec;
+    qdr_delivery_t         *delivery;
+};
+
+// Runs on the general work handler thread
+//
+static void qdr_forward_on_message(void *context, void *args, bool discard)
 {
+    qdr_core_t *core = (qdr_core_t *) context;
+    qdr_forward_on_msg_args_t *fwd_args = (qdr_forward_on_msg_args_t *) args;
+
     if (discard) {
-        qd_message_free(work->msg);
-        qdr_delivery_decref(core, work->delivery, "qdr_forward_on_message - discard on shutdown");
+        qd_message_free(fwd_args->msg);
+        qdr_delivery_decref(core, fwd_args->delivery, "qdr_forward_on_message - discard on shutdown");
         return;
     }
 
     qdr_error_t *error = 0;
-    uint64_t disposition = work->on_message(work->on_message_context, work->msg, work->maskbit,
-                                            work->inter_router_cost, work->in_conn_id, work->policy_spec, &error);
-    qd_message_free(work->msg);
+    uint64_t disposition = fwd_args->on_message(fwd_args->on_message_context, fwd_args->msg, fwd_args->maskbit,
+                                                fwd_args->inter_router_cost, fwd_args->in_conn_id, fwd_args->policy_spec, &error);
+    qd_message_free(fwd_args->msg);
 
-    if (!work->delivery) {
+    if (!fwd_args->delivery) {
         qdr_error_free(error);
         return;
     }
 
-    if (!work->delivery->multicast) {
+    if (!fwd_args->delivery->multicast) {
         qdr_action_t*action = qdr_action(qdr_settle_subscription_delivery_CT, "settle_subscription_delivery");
-        action->args.delivery.delivery    = work->delivery;
+        action->args.delivery.delivery    = fwd_args->delivery;
         action->args.delivery.disposition = disposition;
         if (error) {
             // setting the local state will cause proton to send this
             // error to the remote
-            qd_delivery_state_free(work->delivery->local_state);
-            work->delivery->local_state = qd_delivery_state_from_error(error);
+            qd_delivery_state_free(fwd_args->delivery->local_state);
+            fwd_args->delivery->local_state = qd_delivery_state_from_error(error);
         }
 
         qdr_action_enqueue(core, action);
         // Transfer the delivery reference from work protection to action protection
     } else {
         qdr_error_free(error);
-        qdr_delivery_decref(core, work->delivery, "qdr_forward_on_message - remove from general work");
+        qdr_delivery_decref(core, fwd_args->delivery, "qdr_forward_on_message - remove from general work");
     }
 }
 
@@ -429,21 +449,24 @@ void qdr_forward_on_message_CT(qdr_core_t *core, qdr_subscription_t *sub, qdr_li
         }
     } else {
         //
-        // The handler runs in an IO thread.  Defer its invocation.
+        // The handler runs on the general work thread.  Defer its invocation.
         //
         if (!!in_delivery)
             qdr_delivery_incref(in_delivery, "qdr_forward_on_message_CT - adding to general work item");
 
-        qdr_general_work_t *work = qdr_general_work(qdr_forward_on_message);
-        work->on_message         = sub->on_message;
-        work->on_message_context = sub->on_message_context;
-        work->msg                = qd_message_copy(msg);
-        work->maskbit            = mask_bit;
-        work->inter_router_cost  = cost;
-        work->in_conn_id         = identity;
-        work->policy_spec        = link ? link->conn->policy_spec : 0;
-        work->delivery           = in_delivery;
-        qdr_post_general_work_CT(core, work);
+        qd_general_work_t *work = qd_general_work(core,
+                                                  qdr_forward_on_message,
+                                                  sizeof(qdr_forward_on_msg_args_t));
+        qdr_forward_on_msg_args_t *args = (qdr_forward_on_msg_args_t *) qd_general_work_args(work);
+        args->on_message         = sub->on_message;
+        args->on_message_context = sub->on_message_context;
+        args->msg                = qd_message_copy(msg);
+        args->maskbit            = mask_bit;
+        args->inter_router_cost  = cost;
+        args->in_conn_id         = identity;
+        args->policy_spec        = link ? link->conn->policy_spec : 0;
+        args->delivery           = in_delivery;
+        qd_post_general_work(work);
     }
 }
 

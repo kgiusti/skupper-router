@@ -28,6 +28,8 @@
 #include "agent_router_metrics.h"
 #include "router_core_private.h"
 #include "qpid/dispatch/amqp.h"
+#include "qpid/dispatch/general_work.h"
+
 
 static void qdr_manage_read_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_manage_create_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
@@ -41,7 +43,6 @@ ALLOC_DEFINE(qdr_query_t);
 struct qdr_agent_t {
     qdr_query_list_t       outgoing_query_list;
     sys_mutex_t            query_lock;
-    qd_timer_t            *timer;
     qdr_manage_response_t  response_handler;
     qdr_subscription_t    *subscription_mobile;
     qdr_subscription_t    *subscription_local;
@@ -52,12 +53,16 @@ struct qdr_agent_t {
 // Internal Functions
 //==================================================================================
 
-static void qdr_agent_response_handler(void *context)
+// Runs on the general work thread
+static void qdr_agent_response_handler(void *context, void *args, bool discard)
 {
     qdr_core_t  *core = (qdr_core_t*) context;
     qdr_agent_t *agent = core->mgmt_agent;
     qdr_query_t *query;
     bool         done = false;
+
+    if (discard)
+        return;
 
     while (!done) {
         sys_mutex_lock(&agent->query_lock);
@@ -86,8 +91,10 @@ void qdr_agent_enqueue_response_CT(qdr_core_t *core, qdr_query_t *query)
     bool notify = DEQ_SIZE(agent->outgoing_query_list) == 1;
     sys_mutex_unlock(&agent->query_lock);
 
-    if (notify)
-        qd_timer_schedule(agent->timer, 0);
+    if (notify) {
+        qd_general_work_t *work = qd_general_work(core, qdr_agent_response_handler, 0);
+        qd_post_general_work(work);
+    }
 }
 
 
@@ -128,7 +135,6 @@ qdr_agent_t *qdr_agent(qdr_core_t *core)
 
     DEQ_INIT(agent->outgoing_query_list);
     sys_mutex_init(&agent->query_lock);
-    agent->timer = qd_timer(core->qd, qdr_agent_response_handler, core);
     return agent;
 }
 
@@ -137,7 +143,14 @@ qdr_agent_t *qdr_agent(qdr_core_t *core)
 void qdr_agent_free(qdr_agent_t *agent)
 {
     if (agent) {
-        qd_timer_free(agent->timer);
+
+        qdr_query_t *query = DEQ_HEAD(agent->outgoing_query_list);
+        while (query) {
+            DEQ_REMOVE_HEAD(agent->outgoing_query_list);
+            qdr_query_free(query);
+            query = DEQ_HEAD(agent->outgoing_query_list);
+        }
+
         sys_mutex_free(&agent->query_lock);
 
         //we can't call qdr_core_unsubscribe on the subscriptions because the action processing thread has

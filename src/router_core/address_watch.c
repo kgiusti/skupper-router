@@ -19,6 +19,7 @@
 
 #include "router_core_private.h"
 #include "qpid/dispatch/amqp.h"
+#include "qpid/dispatch/general_work.h"
 
 struct qdr_address_watch_t {
     DEQ_LINKS(struct qdr_address_watch_t);
@@ -33,8 +34,8 @@ struct qdr_address_watch_t {
 ALLOC_DECLARE(qdr_address_watch_t);
 ALLOC_DEFINE(qdr_address_watch_t);
 
-static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard);
-static void qdr_watch_cancel_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard);
+static void qdr_watch_invoker(void *context, void *args, bool discard);
+static void qdr_watch_cancel_invoker(void *context, void *args, bool discard);
 static void qdr_core_watch_address_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_core_unwatch_address_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_address_watch_free_CT(qdr_core_t *core, qdr_address_watch_t *watch);
@@ -80,19 +81,41 @@ void qdr_core_unwatch_address(qdr_core_t *core, qdr_watch_handle_t handle)
 //==================================================================================
 // In-Core API Functions
 //==================================================================================
+
+// arguments for the qdr_watch_invoker() update handler work item
+//
+typedef struct qdr_watch_invoker_args_t qdr_watch_invoker_args_t;
+struct qdr_watch_invoker_args_t {
+    qdr_address_watch_update_t   watch_update_handler;
+    uint32_t                     local_consumers;
+    uint32_t                     in_proc_consumers;
+    uint32_t                     remote_consumers;
+    uint32_t                     local_producers;
+};
+
+// arguments for the qdr_watch_cancel_invoker() cancel handler work item
+//
+typedef struct qdr_watch_cancel_invoker_args_t qdr_watch_cancel_invoker_args_t;
+struct qdr_watch_cancel_invoker_args_t {
+    qdr_address_watch_cancel_t   watch_cancel_handler;
+};
+
+
 void qdr_trigger_address_watch_CT(qdr_core_t *core, qdr_address_t *addr)
 {
     qdr_address_watch_t *watch = DEQ_HEAD(addr->watches);
 
     while (!!watch) {
-        qdr_general_work_t *work = qdr_general_work(qdr_watch_invoker);
-        work->watch_update_handler = watch->on_update;
-        work->context              = watch->context;
-        work->local_consumers      = DEQ_SIZE(addr->rlinks);
-        work->in_proc_consumers    = DEQ_SIZE(addr->subscriptions);
-        work->remote_consumers     = qd_bitmask_cardinality(addr->rnodes);
-        work->local_producers      = DEQ_SIZE(addr->inlinks);
-        qdr_post_general_work_CT(core, work);
+        qd_general_work_t *work = qd_general_work(watch->context,
+                                                  qdr_watch_invoker,
+                                                  sizeof(qdr_watch_invoker_args_t));
+        qdr_watch_invoker_args_t *args = (qdr_watch_invoker_args_t *) qd_general_work_args(work);
+        args->watch_update_handler = watch->on_update;
+        args->local_consumers      = DEQ_SIZE(addr->rlinks);
+        args->in_proc_consumers    = DEQ_SIZE(addr->subscriptions);
+        args->remote_consumers     = qd_bitmask_cardinality(addr->rnodes);
+        args->local_producers      = DEQ_SIZE(addr->inlinks);
+        qd_post_general_work(work);
         watch = DEQ_NEXT_N(PER_ADDRESS, watch);
     }
 }
@@ -124,18 +147,21 @@ static void qdr_address_watch_free_CT(qdr_core_t *core, qdr_address_watch_t *wat
 }
 
 
-static void qdr_watch_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+static void qdr_watch_invoker(void *context, void *args, bool discard)
 {
-    if (!discard)
-        work->watch_update_handler(work->context,
-                                   work->local_consumers, work->in_proc_consumers, work->remote_consumers, work->local_producers);
+    if (!discard) {
+        qdr_watch_invoker_args_t *iargs = (qdr_watch_invoker_args_t *) args;
+        iargs->watch_update_handler(context,
+                                   iargs->local_consumers, iargs->in_proc_consumers, iargs->remote_consumers, iargs->local_producers);
+    }
 }
 
 
-static void qdr_watch_cancel_invoker(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+static void qdr_watch_cancel_invoker(void *context, void *args, bool discard)
 {
     // @TODO(kgiusti): pass discard flag to handler to allow it to clean up the context
-    work->watch_cancel_handler(work->context);
+    qdr_watch_cancel_invoker_args_t *iargs = (qdr_watch_cancel_invoker_args_t *) args;
+    iargs->watch_cancel_handler(context);
 }
 
 
@@ -204,10 +230,12 @@ static void qdr_core_unwatch_address_CT(qdr_core_t *core, qdr_action_t *action, 
             if (watch->watch_handle == watch_handle) {
                 DEQ_REMOVE(core->addr_watches, watch);
                 if (!!watch->on_cancel) {
-                    qdr_general_work_t *work = qdr_general_work(qdr_watch_cancel_invoker);
-                    work->watch_cancel_handler = watch->on_cancel;
-                    work->context              = watch->context;
-                    qdr_post_general_work_CT(core, work);
+                    qd_general_work_t *work = qd_general_work(watch->context,
+                                                              qdr_watch_cancel_invoker,
+                                                              sizeof(qdr_watch_cancel_invoker_args_t));
+                    qdr_watch_cancel_invoker_args_t *args = (qdr_watch_cancel_invoker_args_t *) qd_general_work_args(work);
+                    args->watch_cancel_handler = watch->on_cancel;
+                    qd_post_general_work(work);
                 }
                 qdr_address_watch_free_CT(core, watch);
                 break;

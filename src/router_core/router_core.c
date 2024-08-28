@@ -21,6 +21,7 @@
 #include "delivery.h"
 #include "route_control.h"
 #include "router_core_private.h"
+#include "qpid/dispatch/general_work.h"
 
 #include <stdio.h>
 #include <strings.h>
@@ -35,7 +36,6 @@ ALLOC_DEFINE_SAFE(qdr_link_t);
 ALLOC_DEFINE(qdr_router_ref_t);
 ALLOC_DEFINE(qdr_link_ref_t);
 ALLOC_DEFINE(qdr_delivery_cleanup_t);
-ALLOC_DEFINE(qdr_general_work_t);
 ALLOC_DEFINE(qdr_link_work_t);
 ALLOC_DEFINE_SAFE(qdr_connection_ref_t);
 ALLOC_DEFINE(qdr_connection_info_t);
@@ -43,7 +43,6 @@ ALLOC_DEFINE(qdr_subscription_ref_t);
 
 const uint64_t QD_DELIVERY_MOVED_TO_NEW_LINK = 999999999;
 
-static void qdr_general_handler(void *context);
 
 static void qdr_core_setup_init(qdr_core_t *core)
 {
@@ -103,10 +102,6 @@ qdr_core_t *qdr_core(qd_dispatch_t *qd, qd_router_mode_t mode, const char *area,
     DEQ_INIT(core->action_list);
     DEQ_INIT(core->action_list_background);
 
-    sys_mutex_init(&core->work_lock);
-    DEQ_INIT(core->work_list);
-    core->work_timer = qd_timer(core->qd, qdr_general_handler, core);
-
     //
     // Set up the unique identifier generator
     //
@@ -155,6 +150,9 @@ void qdr_core_free(qdr_core_t *core)
 
     // have adaptors clean up all core resources
     qdr_adaptors_finalize(core);
+
+    // At this point all threads are stopped. It is safe to discard any pending general work items
+    qd_general_work_finalize();
 
     //
     // The char* core->router_id and core->router_area are owned by qd->router_id and qd->router_area respectively
@@ -300,17 +298,6 @@ void qdr_core_free(qdr_core_t *core)
 
     qdr_agent_free(core->mgmt_agent);
 
-    // discard any left over general work items, allowing them to clean up any
-    // resources held by the work item
-
-    while (!DEQ_IS_EMPTY(core->work_list)) {
-        qdr_general_work_t *work = DEQ_HEAD(core->work_list);
-        DEQ_REMOVE_HEAD(core->work_list);
-        work->handler(core, work, true);  // discard == true
-        free_qdr_general_work_t(work);
-        work = DEQ_HEAD(core->work_list);
-    }
-
     // discard any left over actions, allowing them to clean up any resources
     // held by the action
 
@@ -346,7 +333,6 @@ void qdr_core_free(qdr_core_t *core)
     // action/work handler did not properly honor the discard flag and needs to
     // be fixed!
 
-    assert(DEQ_IS_EMPTY(core->work_list));
     assert(DEQ_IS_EMPTY(core->action_list));
     assert(DEQ_IS_EMPTY(core->action_list_background));
     assert(DEQ_IS_EMPTY(core->streaming_connections));
@@ -366,9 +352,7 @@ void qdr_core_free(qdr_core_t *core)
     sys_thread_free(core->thread);
     sys_cond_free(&core->action_cond);
     sys_mutex_free(&core->action_lock);
-    sys_mutex_free(&core->work_lock);
     sys_mutex_free(&core->id_lock);
-    qd_timer_free(core->work_timer);
 
     free(core);
 }
@@ -1015,50 +999,6 @@ void qdr_del_subscription_ref_CT(qdr_subscription_ref_list_t *list, qdr_subscrip
 }
 
 
-static void qdr_general_handler(void *context)
-{
-    qdr_core_t              *core = (qdr_core_t*) context;
-    qdr_general_work_list_t  work_list;
-    qdr_general_work_t      *work;
-
-    sys_mutex_lock(&core->work_lock);
-    DEQ_MOVE(core->work_list, work_list);
-    sys_mutex_unlock(&core->work_lock);
-
-    work = DEQ_HEAD(work_list);
-    while (work) {
-        DEQ_REMOVE_HEAD(work_list);
-        work->handler(core, work, false);
-        free_qdr_general_work_t(work);
-        work = DEQ_HEAD(work_list);
-    }
-}
-
-
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler)
-{
-    qdr_general_work_t *work = new_qdr_general_work_t();
-    ZERO(work);
-    work->handler = handler;
-    return work;
-}
-
-
-void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work)
-{
-    bool notify;
-
-    sys_mutex_lock(&core->work_lock);
-    DEQ_ITEM_INIT(work);
-    DEQ_INSERT_TAIL(core->work_list, work);
-    notify = DEQ_SIZE(core->work_list) == 1;
-    sys_mutex_unlock(&core->work_lock);
-
-    if (notify)
-        qd_timer_schedule(core->work_timer, 0);
-}
-
-
 uint64_t qdr_identifier(qdr_core_t* core)
 {
     sys_mutex_lock(&core->id_lock);
@@ -1082,9 +1022,19 @@ void qdr_connection_work_free_CT(qdr_connection_work_t *work)
     free_qdr_connection_work_t(work);
 }
 
-static void qdr_post_global_stats_response(qdr_core_t *core, qdr_general_work_t *work, bool discard)
+
+// Arguments to the callback for posting the Global Statistics response
+typedef struct qdr_post_global_stats_args_t qdr_post_global_stats_args_t;
+struct qdr_post_global_stats_args_t {
+    qdr_global_stats_handler_t stats_handler;
+};
+
+
+// Runs on the general work thread (not core)
+static void qdr_post_global_stats_response(void *context, void *args, bool discard)
 {
-    work->stats_handler(work->context, discard);
+    qdr_post_global_stats_args_t *stats_args = (qdr_post_global_stats_args_t *) args;
+    stats_args->stats_handler(context, discard);
 }
 
 static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
@@ -1113,10 +1063,13 @@ static void qdr_global_stats_request_CT(qdr_core_t *core, qdr_action_t *action, 
             stats->deliveries_stuck = core->deliveries_stuck;
             stats->links_blocked = core->links_blocked;
         }
-        qdr_general_work_t *work = qdr_general_work(qdr_post_global_stats_response);
-        work->stats_handler = action->args.stats_request.handler;
-        work->context = action->args.stats_request.context;
-        qdr_post_general_work_CT(core, work);
+
+        qd_general_work_t *work = qd_general_work(action->args.stats_request.context,
+                                                  qdr_post_global_stats_response,
+                                                  sizeof(qdr_post_global_stats_args_t));
+        qdr_post_global_stats_args_t *stats_args = (qdr_post_global_stats_args_t *) qd_general_work_args(work);
+        stats_args->stats_handler = action->args.stats_request.handler;
+        qd_post_general_work(work);
     }
 }
 

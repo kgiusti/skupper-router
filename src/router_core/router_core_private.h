@@ -216,52 +216,6 @@ ALLOC_DECLARE(qdr_delivery_cleanup_t);
 DEQ_DECLARE(qdr_delivery_cleanup_t, qdr_delivery_cleanup_list_t);
 
 //
-// General Work
-//
-// The following types are used to post work to the IO threads for
-// non-connection-specific action.  These actions are serialized through
-// a zero-delay timer and are processed by one thread at a time.  General
-// actions occur in-order and are not run concurrently.
-//
-// If the discard parameter to the handler is true the router is in the process
-// of shutting down and cleaning up any outstanding general work items. At this
-// point all threads have been shutdown and the handler must avoid scheduling
-// any further work and should simply release any resources held by the work
-// item.
-//
-typedef struct qdr_general_work_t qdr_general_work_t;
-typedef void (*qdr_general_work_handler_t) (qdr_core_t *core, qdr_general_work_t *work, bool discard);
-
-struct qdr_general_work_t {
-    DEQ_LINKS(qdr_general_work_t);
-    qdr_general_work_handler_t   handler;
-    int                          maskbit;
-    int                          inter_router_cost;
-    qd_message_t                *msg;
-    qdr_receive_t                on_message;
-    void                        *on_message_context;
-    uint64_t                     in_conn_id;
-    uint64_t                     mobile_seq;
-    uint32_t                     local_consumers;
-    uint32_t                     in_proc_consumers;
-    uint32_t                     remote_consumers;
-    uint32_t                     local_producers;
-    const qd_policy_spec_t      *policy_spec;
-    qdr_delivery_t              *delivery;
-    qdr_delivery_cleanup_list_t  delivery_cleanup_list;
-    qdr_global_stats_handler_t   stats_handler;
-    qdr_address_watch_update_t   watch_update_handler;
-    qdr_address_watch_cancel_t   watch_cancel_handler;
-    void                        *context;
-};
-
-ALLOC_DECLARE(qdr_general_work_t);
-DEQ_DECLARE(qdr_general_work_t, qdr_general_work_list_t);
-
-qdr_general_work_t *qdr_general_work(qdr_general_work_handler_t handler);
-
-
-//
 // Connection Work
 //
 // The following types are used to post work to the IO threads for
@@ -815,10 +769,7 @@ struct qdr_core_t {
 
     bool disable_867_fix; /// True if the fix for issue #867 is to be disabled
 
-    sys_mutex_t              work_lock;
     qdr_core_timer_list_t    scheduled_timers;
-    qdr_general_work_list_t  work_list;
-    qd_timer_t              *work_timer;
     sys_atomic_t             uptime_ticks;
 
     qdr_protocol_adaptor_list_t  protocol_adaptors;
@@ -960,7 +911,6 @@ void qdr_post_set_mobile_seq_CT(qdr_core_t *core, int router_maskbit, uint64_t m
 void qdr_post_set_my_mobile_seq_CT(qdr_core_t *core, uint64_t mobile_seq);
 void qdr_post_link_lost_CT(qdr_core_t *core, int link_maskbit);
 
-void qdr_post_general_work_CT(qdr_core_t *core, qdr_general_work_t *work);
 void qdr_check_addr_CT(qdr_core_t *core, qdr_address_t *addr);
 void qdr_process_addr_attributes_CT(qdr_core_t *core, qdr_address_t *addr);
 bool qdr_is_addr_treatment_multicast(qdr_address_t *addr);

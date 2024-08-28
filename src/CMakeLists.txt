@@ -148,6 +148,7 @@ set(qpid_dispatch_SOURCES
   qd_asan_interface.c
   protocols.c
   connection_counters.c
+  general_work.c
   )
 
 set(qpid_dispatch_INCLUDES
