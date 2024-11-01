@@ -1078,6 +1078,76 @@ static void AMQP_disposition_handler(qd_router_t *router, qd_link_t *link, pn_de
 
 
 /**
+ * Handle session window update events
+ */
+static int AMQP_session_flow_handler(qd_router_t *router, qd_session_t *qd_ssn)
+{
+    // ignore this event unless there are links blocked on output capacity
+    if (!qd_session_is_q3_blocked(qd_ssn))
+        return 0;
+
+    // If there are blocked links wait for the low watermark to be crossed
+    if (qd_session_get_outgoing_capacity(qd_ssn) < qd_session_low_outgoing_bytes)
+        return 0;
+
+    // there are blocked links and there is enough session output capacity to restart sending
+
+    bool activate_cutthrough = false;
+    qd_link_list_t  *blinks  = qd_session_q3_blocked_links(qd_ssn);
+    qd_link_t       *blink   = DEQ_HEAD(*blinks);
+    qd_connection_t *conn    = qd_link_connection(blink);
+
+    while (blink) {
+        qd_link_q3_unblock(blink);  // removes from blinks list!
+        pn_link_t *pnlink = qd_link_pn(blink);
+        pn_delivery_t *pdlv = pn_link_current(pnlink);
+        if (!!pdlv) {
+            // How we restart output on a link depends on whether the delivery is cut-through or the legacy
+            // "through to core" path
+            qdr_delivery_t     *qdlv = qdr_node_delivery_qdr_from_pn(pdlv);
+            if (qdr_delivery_is_unicast_cutthrough(qdlv)) {
+                qdr_delivery_ref_t *dref = new_qdr_delivery_ref_t();
+                bool used = false;
+
+                sys_spinlock_lock(&conn->outbound_cutthrough_spinlock);
+                if (!qdlv->cutthrough_list_ref) {
+                    DEQ_ITEM_INIT(dref);
+                    dref->dlv = qdlv;
+                    qdlv->cutthrough_list_ref = dref;
+                    DEQ_INSERT_TAIL(conn->outbound_cutthrough_worklist, dref);
+                    qdr_delivery_incref(qdlv, "Recover from Q3 stall");
+                    used = true;
+                    activate_cutthrough = true;
+                }
+                sys_spinlock_unlock(&conn->outbound_cutthrough_spinlock);
+
+                if (!used) {
+                    free_qdr_delivery_ref_t(dref);
+                }
+
+            } else {
+                // non-cutthrough delivery: slowpath through core by hijacking existing link flow path
+                qdr_link_t *rlink = (qdr_link_t *) qd_link_get_context(blink);
+                if (rlink) {
+                    // signalling flow to the core causes the link to be re-activated
+                    qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
+                }
+            }
+        }
+
+        blink = DEQ_HEAD(*blinks);
+    }
+
+    if (activate_cutthrough) {
+        SET_ATOMIC_FLAG(&conn->wake_cutthrough_outbound);
+        AMQP_conn_wake_handler(router, conn, 0);
+    }
+
+    return 0;
+}
+
+
+/**
  * New Incoming Link Handler
  */
 static int AMQP_incoming_link_handler(qd_router_t *router, qd_link_t *link)
@@ -1155,15 +1225,8 @@ static int AMQP_link_attach_handler(qd_router_t *router, qd_link_t *link)
 }
 
 
-static int AMQP_session_flow_handler(qd_router_t *router, qd_session_t *ssn)
-{
-    return 0; // XXX
-}
-
-
 /**
- * Handler for flow events on links.  Flow updates include session window
- * state, which needs to be checked for unblocking Q3.
+ * Handler for link credit state changes.
  */
 static int AMQP_link_flow_handler(qd_router_t *router, qd_link_t *link)
 {
@@ -1173,77 +1236,18 @@ static int AMQP_link_flow_handler(qd_router_t *router, qd_link_t *link)
     if (rlink) {
         qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
     }
-
-    // check if Q3 can be unblocked
-    qd_session_t *qd_ssn = qd_link_get_session(link);
-    if (qd_session_is_q3_blocked(qd_ssn)) {
-        // Q3 blocked - have we drained enough outgoing bytes?
-        if (qd_session_get_outgoing_capacity(qd_ssn) >= qd_session_low_outgoing_bytes) {
-            // yes.  We must now unblock all links that have been blocked by Q3
-
-            qd_link_list_t  *blinks = qd_session_q3_blocked_links(qd_ssn);
-            qd_link_t       *blink  = DEQ_HEAD(*blinks);
-            qd_connection_t *conn   = qd_link_connection(blink);
-
-            while (blink) {
-                qd_link_q3_unblock(blink);  // removes from blinks list!
-                pnlink = qd_link_pn(blink);
-                if (blink != link) {        // already flowed this link
-                    rlink = (qdr_link_t *) qd_link_get_context(blink);
-                    if (rlink) {
-                        // signalling flow to the core causes the link to be re-activated
-                        qdr_link_flow(router->router_core, rlink, pn_link_remote_credit(pnlink), pn_link_get_drain(pnlink));
-                    }
-                }
-
-                pn_delivery_t *pdlv = pn_link_current(pnlink);
-                if (!!pdlv) {
-                    qdr_delivery_t     *qdlv = qdr_node_delivery_qdr_from_pn(pdlv);
-                    //
-                    //https://github.com/skupperproject/skupper-router/issues/1221
-                    // Add the delivery/delivery_ref to the outbound_cutthrough_worklist
-                    // only if the delivery is a cut-through delivery.
-                    // Pure all-AMQP deliveries/delivery_refs will never be cut-through and hence will never be placed
-                    // on the conn->outbound_cutthrough_worklist.
-                    //
-                    if (qdr_delivery_is_unicast_cutthrough(qdlv)) {
-                        qdr_delivery_ref_t *dref = new_qdr_delivery_ref_t();
-                        bool used = false;
-
-                        sys_spinlock_lock(&conn->outbound_cutthrough_spinlock);
-                        if (!qdlv->cutthrough_list_ref) {
-                            DEQ_ITEM_INIT(dref);
-                            dref->dlv = qdlv;
-                            qdlv->cutthrough_list_ref = dref;
-                            DEQ_INSERT_TAIL(conn->outbound_cutthrough_worklist, dref);
-                            qdr_delivery_incref(qdlv, "Recover from Q3 stall");
-                            used = true;
-                        }
-                        sys_spinlock_unlock(&conn->outbound_cutthrough_spinlock);
-
-                        if (!used) {
-                            free_qdr_delivery_ref_t(dref);
-                        }
-                    }
-                }
-
-                blink = DEQ_HEAD(*blinks);
-            }
-
-            //
-            // Wake the connection for outgoing cut-through
-            //
-            SET_ATOMIC_FLAG(&conn->wake_cutthrough_outbound);
-            AMQP_conn_wake_handler(router, conn, 0);
-        }
-    }
     return 0;
 }
 
 
+/**
+ * The link has sent one or more transfer frames.
+ */
 static int AMQP_link_work_handler(qd_router_t *router, qd_link_t *link)
 {
-    return 0; // XXX
+    // Sending frames may have opened up more outgoing capacity on the parent session.
+    // Check for any blocked outgoing links
+    return AMQP_session_flow_handler(router, qd_link_get_session(link));
 }
 
 /**
