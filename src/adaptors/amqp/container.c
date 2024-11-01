@@ -558,6 +558,14 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
         }
         break;
 
+    case PN_SESSION_FLOW: {
+        ssn = pn_event_session(event);
+        qd_session_t *qd_ssn = qd_session_from_pn(ssn);
+        if (qd_ssn)
+            container->ntype->session_flow_handler(container->qd_router, qd_ssn);
+        break;
+    }
+
     case PN_LINK_REMOTE_OPEN :
         if (!(pn_connection_state(conn) & PN_LOCAL_CLOSED)) {
             pn_link = pn_event_link(event);
@@ -632,6 +640,13 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
         qd_link = (qd_link_t*) pn_link_get_context(pn_link);
         if (qd_link)
             container->ntype->link_flow_handler(container->qd_router, qd_link);
+        break;
+
+    case PN_LINK_WORK:
+        pn_link = pn_event_link(event);
+        qd_link = (qd_link_t*) pn_link_get_context(pn_link);
+        if (qd_link)
+            container->ntype->link_work_handler(container->qd_router, qd_link);
         break;
 
     case PN_DELIVERY :

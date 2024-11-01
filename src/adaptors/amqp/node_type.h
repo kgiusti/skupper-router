@@ -29,6 +29,7 @@ typedef int  (*qd_container_link_handler_t)                      (qd_router_t *,
 typedef int  (*qd_container_link_detach_handler_t)               (qd_router_t *, qd_link_t *link, qd_detach_type_t dt);
 typedef void (*qd_container_node_handler_t)                      (qd_router_t *);
 typedef int  (*qd_container_conn_handler_t)                      (qd_router_t *, qd_connection_t *conn, void *context);
+typedef int  (*qd_container_session_handler_t)                   (qd_router_t *, qd_session_t *ssn);
 typedef void (*qd_container_link_abandoned_deliveries_handler_t) (qd_router_t *, qd_link_t *link);
 
 /**
@@ -66,8 +67,12 @@ struct qd_node_type_t {
 
     qd_container_link_abandoned_deliveries_handler_t link_abandoned_deliveries_handler;
 
+    qd_container_session_handler_t session_flow_handler;
+
     /** Invoked when a link receives a flow event */
     qd_container_link_handler_t link_flow_handler;
+
+    qd_container_link_handler_t link_work_handler;
 
     /** @name Node-Type Handlers
      * @{

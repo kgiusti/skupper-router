@@ -292,7 +292,8 @@ static bool event_handler(pn_event_t *event)
         }
     } break;
 
-    case PN_LINK_FLOW: {
+    case PN_LINK_FLOW:
+    case PN_LINK_WORK: {
         // the remote has given us some credit, now we can send messages
         //
         static long tag = 0;  // a simple tag generator

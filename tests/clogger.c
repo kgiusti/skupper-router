@@ -228,7 +228,8 @@ static bool event_handler(pn_event_t *event)
         debug("Remote MAX FRAME=%u\n", remote_max_frame);
     } break;
 
-    case PN_LINK_FLOW: {
+    case PN_LINK_FLOW:
+    case PN_LINK_WORK: {
         // the remote has given us some credit, now we can send messages
         //
         if (limit == 0 || sent < limit) {

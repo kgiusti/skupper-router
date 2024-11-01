@@ -1155,6 +1155,12 @@ static int AMQP_link_attach_handler(qd_router_t *router, qd_link_t *link)
 }
 
 
+static int AMQP_session_flow_handler(qd_router_t *router, qd_session_t *ssn)
+{
+    return 0; // XXX
+}
+
+
 /**
  * Handler for flow events on links.  Flow updates include session window
  * state, which needs to be checked for unblocking Q3.
@@ -1234,6 +1240,11 @@ static int AMQP_link_flow_handler(qd_router_t *router, qd_link_t *link)
     return 0;
 }
 
+
+static int AMQP_link_work_handler(qd_router_t *router, qd_link_t *link)
+{
+    return 0; // XXX
+}
 
 /**
  * Link Detached Handler
@@ -1797,7 +1808,9 @@ static const qd_node_type_t router_node = {"router", 0,
                                      AMQP_link_detach_handler,
                                      AMQP_link_attach_handler,
                                      qd_link_abandoned_deliveries_handler,
+                                     AMQP_session_flow_handler,
                                      AMQP_link_flow_handler,
+                                     AMQP_link_work_handler,
                                      0,   // node_created_handler
                                      0,   // node_destroyed_handler
                                      AMQP_inbound_opened_handler,
