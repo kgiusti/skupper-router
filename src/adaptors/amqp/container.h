@@ -101,6 +101,7 @@ void qd_link_close(qd_link_t *link);
 void qd_link_detach(qd_link_t *link);
 void qd_link_free(qd_link_t *link);
 void qd_link_q2_restart_receive(const qd_alloc_safe_ptr_t context);
+bool qd_link_is_q3_blocked(const qd_link_t *link);
 void qd_link_q3_block(qd_link_t *link);
 void qd_link_q3_unblock(qd_link_t *link);
 uint64_t qd_link_link_id(const qd_link_t *link);

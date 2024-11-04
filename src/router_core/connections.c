@@ -426,6 +426,14 @@ int qdr_connection_process(qdr_connection_t *conn)
             conn->protocol_adaptor->conn_trace_handler(conn->protocol_adaptor->user_context, conn, false);
             break;
 
+        case QDR_CONNECTION_WORK_SCHEDULE_LINK: {
+            if (work->link->ref[QDR_LINK_LIST_CLASS_LOCAL] == 0) {
+                qdr_add_link_ref(&links_with_work[work->link->priority], work->link, QDR_LINK_LIST_CLASS_LOCAL);
+                work->link->processing = true;
+            }
+            break;
+        }
+
         }
 
         qdr_connection_work_free_CT(work);
@@ -824,6 +832,21 @@ void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
         qdr_connection_activate_CT(core, conn);
 }
 
+
+void qdr_link_schedule_hack(qdr_link_t *link)
+{
+    qdr_connection_t *conn = link->conn;
+    if (conn) {
+        qdr_connection_work_t *work = new_qdr_connection_work_t();
+        ZERO(work);
+        work->work_type = QDR_CONNECTION_WORK_SCHEDULE_LINK;
+        work->link      = link;
+
+        sys_mutex_lock(&conn->work_lock);
+        DEQ_INSERT_TAIL(conn->work_list, work);
+        sys_mutex_unlock(&conn->work_lock);
+    }
+}
 
 void qdr_link_enqueue_work_CT(qdr_core_t      *core,
                               qdr_link_t      *link,

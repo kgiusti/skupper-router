@@ -918,6 +918,13 @@ void qd_link_q3_unblock(qd_link_t *link)
 }
 
 
+bool qd_link_is_q3_blocked(const qd_link_t *link)
+{
+    assert(link);
+    return link->q3_blocked;
+}
+
+
 uint64_t qd_link_link_id(const qd_link_t *link)
 {
     return link->link_id;
