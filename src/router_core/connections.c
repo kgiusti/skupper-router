@@ -37,10 +37,9 @@ static void qdr_link_inbound_first_attach_CT(qdr_core_t *core, qdr_action_t *act
 static void qdr_link_inbound_second_attach_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_inbound_detach_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 static void qdr_link_notify_closed_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
-static void qdr_link_processing_complete_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
-static void qdr_link_processing_complete(qdr_core_t *core, qdr_link_t *link);
 static void qdr_connection_group_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn);
 static void qdr_connection_set_tracing_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
+static void qdr_link_drop_use_count(qdr_link_t *link);
 
 ALLOC_DEFINE_SAFE(qdr_connection_t);
 ALLOC_DEFINE(qdr_connection_work_t);
@@ -368,13 +367,9 @@ int qdr_connection_process(qdr_connection_t *conn)
     if (!conn)
         return 0;
     qdr_connection_work_list_t  work_list;
-    qdr_link_ref_list_t         links_with_work[QDR_N_PRIORITIES];
+    qdr_link_list_t             links_with_work[QDR_N_PRIORITIES];
     qdr_core_t                 *core = conn->core;
     int                         event_count = 0;
-
-    qdr_link_ref_t *ref;
-    qdr_link_t     *link;
-    bool            detach_sent;
 
     sys_mutex_lock(&conn->work_lock);
 
@@ -387,21 +382,11 @@ int qdr_connection_process(qdr_connection_t *conn)
     }
 
     DEQ_MOVE(conn->work_list, work_list);
-    for (int priority = 0; priority <= QDR_MAX_PRIORITY; ++ priority) {
-        DEQ_MOVE(conn->links_with_work[priority], links_with_work[priority]);
-
-        //
-        // Move the references from CLASS_WORK to CLASS_LOCAL so concurrent action in the core
-        // thread doesn't assume these links are referenced from the connection's list.
-        //
-        ref = DEQ_HEAD(links_with_work[priority]);
-        while (ref) {
-            move_link_ref(ref->link, QDR_LINK_LIST_CLASS_WORK, QDR_LINK_LIST_CLASS_LOCAL);
-            ref->link->processing = true;
-            ref = DEQ_NEXT(ref);
-        }
-    }
     sys_mutex_unlock(&conn->work_lock);
+
+    for (int priority = 0; priority <= QDR_MAX_PRIORITY; ++priority) {
+        DEQ_INIT(links_with_work[priority]);
+    }
 
     event_count += DEQ_SIZE(work_list);
     qdr_connection_work_t *work = DEQ_HEAD(work_list);
@@ -425,6 +410,9 @@ int qdr_connection_process(qdr_connection_t *conn)
             conn->protocol_adaptor->conn_trace_handler(conn->protocol_adaptor->user_context, conn, false);
             break;
 
+        case QDR_CONNECTION_WORK_PROCESS_LINK:
+            DEQ_INSERT_TAIL_N(CONN_WORK, links_with_work[work->link->priority], work->link);
+            break;
         }
 
         qdr_connection_work_free_CT(work);
@@ -432,33 +420,33 @@ int qdr_connection_process(qdr_connection_t *conn)
     }
 
     // Process the links_with_work array from highest to lowest priority.
-    for (int priority = QDR_MAX_PRIORITY; priority >= 0; -- priority) {
-        ref = DEQ_HEAD(links_with_work[priority]);
-        while (ref) {
-            qdr_link_work_t *link_work;
-            detach_sent = false;
-            link = ref->link;
+
+    for (int priority = QDR_MAX_PRIORITY; priority >= 0; --priority) {
+        qdr_link_t *link = DEQ_HEAD(links_with_work[priority]);
+        while (link) {
+            bool                    detach_sent = false;
+            qdr_delivery_ref_list_t updated_deliveries;
+
+            DEQ_REMOVE_HEAD_N(CONN_WORK, links_with_work[priority]);
 
             //
-            // The work lock must be used to protect accesses to the link's work_list and
-            // link_work->processing.
+            // The work lock must be used to protect accesses to the link's work_list, scheduling flag, and
+            // updated_deliveries.
             //
+
             sys_mutex_lock(&conn->work_lock);
-            link_work = DEQ_HEAD(link->work_list);
+            link->is_scheduled = false;  // allow link rescheduling while it is being processed
+            DEQ_MOVE(link->updated_deliveries, updated_deliveries);
+            qdr_link_work_t *link_work = DEQ_HEAD(link->work_list);
             if (link_work) {
-                // link_work ref transferred to local link_work
-                DEQ_REMOVE_HEAD(link->work_list);
                 link_work->processing = true;
+                DEQ_REMOVE_HEAD(link->work_list);
             }
             sys_mutex_unlock(&conn->work_lock);
 
             //
             // Handle disposition/settlement updates
             //
-            qdr_delivery_ref_list_t updated_deliveries;
-            sys_mutex_lock(&conn->work_lock);
-            DEQ_MOVE(link->updated_deliveries, updated_deliveries);
-            sys_mutex_unlock(&conn->work_lock);
 
             qdr_delivery_ref_t *dref = DEQ_HEAD(updated_deliveries);
             while (dref) {
@@ -468,6 +456,10 @@ int qdr_connection_process(qdr_connection_t *conn)
                 dref = DEQ_HEAD(updated_deliveries);
                 event_count++;
             }
+
+            //
+            // Process the link work list
+            //
 
             while (link_work) {
                 switch (link_work->work_type) {
@@ -500,10 +492,11 @@ int qdr_connection_process(qdr_connection_t *conn)
 
                 sys_mutex_lock(&conn->work_lock);
                 if (link_work->work_type == QDR_LINK_WORK_DELIVERY && link_work->value > 0) {
-                    // link_work ref transferred from link_work to work_list
+                    // Could not push all deliveries associated with the link_work entry. Put it back on the link work
+                    // list to continue processing it next time the link is scheduled.
                     DEQ_INSERT_HEAD(link->work_list, link_work);
                     link_work->processing = false;
-                    link_work = 0; // Halt work processing
+                    link_work = 0; // Halt work processing for this link
                 } else {
                     qdr_link_work_release(link_work);
                     link_work = DEQ_HEAD(link->work_list);
@@ -514,32 +507,18 @@ int qdr_connection_process(qdr_connection_t *conn)
                     }
                 }
                 sys_mutex_unlock(&conn->work_lock);
-                event_count++;
             }
 
             if (!detach_sent) {
                 qdr_record_link_credit(core, link);
             }
 
-            ref = DEQ_NEXT(ref);
+            // Done processing this link. Release the reference held by the conn work list.
+
+            qdr_link_drop_use_count(link);
+            link = DEQ_HEAD(links_with_work[priority]);
         }
     }
-
-    sys_mutex_lock(&conn->work_lock);
-    for (int priority = QDR_MAX_PRIORITY; priority >= 0; -- priority) {
-        ref = DEQ_HEAD(links_with_work[priority]);
-        while (ref) {
-            qdr_link_t *link = ref->link;
-
-            link->processing = false;
-            if (link->ready_to_free)
-                qdr_link_processing_complete(core, link);
-
-            qdr_del_link_ref(links_with_work + priority, ref->link, QDR_LINK_LIST_CLASS_LOCAL);
-            ref = DEQ_HEAD(links_with_work[priority]);
-        }
-    }
-    sys_mutex_unlock(&conn->work_lock);
 
     return event_count;
 }
@@ -706,6 +685,7 @@ qdr_link_t *qdr_link_first_attach(qdr_connection_t *conn,
     link->resend_released_deliveries           = dir == QD_INCOMING && qdr_terminus_has_capability(target, QD_CAPABILITY_RESEND_RELEASED);
     link->no_route = no_route;
     link->priority = QDR_DEFAULT_PRIORITY;
+    sys_atomic_init(&link->use_count, 2);  // 1 for caller, 1 for action message
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -775,22 +755,23 @@ void qdr_link_detach_received(qdr_link_t *link, qdr_error_t *error)
 
 void qdr_link_notify_closed(qdr_link_t *link, bool forced)
 {
+    qdr_core_t   *core   = link->core;
     qdr_action_t *action = qdr_action(qdr_link_notify_closed_CT, "link_notify_closed");
 
+    // READ THIS COMMENT! To prevent use-after free of the qdr_link_t the order of this operations must be preserved:
+
+    // 1st: capture a safe pointer while we know the link is not yet freed since we have a use_count:
     set_safe_ptr_qdr_link_t(link, &action->args.connection.link);
     action->args.connection.forced_close = forced;
-    qdr_action_enqueue(link->core, action);
-}
 
-
-static void qdr_link_processing_complete(qdr_core_t *core, qdr_link_t *link)
-{
-    qdr_action_t *action = qdr_action(qdr_link_processing_complete_CT, "link_processing_complete");
-
-    set_safe_ptr_qdr_link_t(link, &action->args.connection.link);
+    // 2nd: drop our reference *before* sending the action. This ensures that if the link is freed by dropping the
+    // reference here then the safe pointer in the action will accurately indicate the link is freed before the core
+    // receives this action. If the use count is dropped *after* the action is sent to the core then it is possible
+    // that the link will be freed while the core thread is processing it (since the safe pointer could indicate that
+    // the pointer is valid when the action was received).
+    qdr_link_drop_use_count(link);
     qdr_action_enqueue(core, action);
 }
-
 
 
 //==================================================================================
@@ -820,6 +801,38 @@ void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
 }
 
 
+void qdr_connection_schedule_link_CT(qdr_connection_t *conn, qdr_link_t *link)
+{
+    assert(sys_thread_role(0) == SYS_THREAD_CORE || sys_thread_role(0) == SYS_THREAD_MAIN);
+    assert(link->conn == conn);
+
+    bool notify = false;
+
+    qdr_connection_work_t *work = new_qdr_connection_work_t();
+    ZERO(work);
+    work->work_type = QDR_CONNECTION_WORK_PROCESS_LINK;
+    work->link = link;
+
+    sys_mutex_lock(&conn->work_lock);
+    if (!link->is_scheduled) {
+        uint32_t uc = sys_atomic_inc(&link->use_count);
+        (void) uc;
+        assert(uc > 0);  // expect caller to have ownership
+        link->is_scheduled = true;
+        DEQ_INSERT_TAIL(conn->work_list, work);
+        work = 0;  // work in use
+        notify = DEQ_SIZE(conn->work_list) == 1;
+    }
+    sys_mutex_unlock(&conn->work_lock);
+
+    if (work) {
+        free_qdr_connection_work_t(work);
+    } else if (notify) {
+        qdr_connection_activate_CT(conn->core, conn);
+    }
+}
+
+
 void qdr_link_enqueue_work_CT(qdr_core_t      *core,
                               qdr_link_t      *link,
                               qdr_link_work_t *work)
@@ -830,10 +843,9 @@ void qdr_link_enqueue_work_CT(qdr_core_t      *core,
     // expect: caller transfers refcount:
     assert(sys_atomic_get(&work->ref_count) > 0);
     DEQ_INSERT_TAIL(link->work_list, work);
-    qdr_add_link_ref(&conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
     sys_mutex_unlock(&conn->work_lock);
 
-    qdr_connection_activate_CT(core, conn);
+    qdr_connection_schedule_link_CT(conn, link);
 }
 
 
@@ -1117,7 +1129,6 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
     //
     sys_mutex_lock(&conn->work_lock);
     qdr_del_link_ref(&conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
-    qdr_del_link_ref(&conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
     sys_mutex_unlock(&conn->work_lock);
 
     if (link->ref[QDR_LINK_LIST_CLASS_ADDRESS]) {
@@ -1166,27 +1177,6 @@ static void qdr_link_cleanup_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_li
 }
 
 
-static void qdr_link_cleanup_protected_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, const char *label)
-{
-    bool do_cleanup = false;
-
-    sys_mutex_lock(&conn->work_lock);
-    // prevent an I/O thread from processing this link (DISPATCH-1475)
-    qdr_del_link_ref(&conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
-    if (link->processing) {
-        // Cannot cleanup link because I/O thread is currently processing it
-        // Mark it so the I/O thread will notify the core when processing is complete
-        link->ready_to_free = true;
-    }
-    else
-        do_cleanup = true;
-    sys_mutex_unlock(&conn->work_lock);
-
-    if (do_cleanup)
-        qdr_link_cleanup_CT(core, conn, link, label);
-}
-
-
 qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
                                qdr_connection_t  *conn,
                                qd_link_type_t     link_type,
@@ -1223,6 +1213,7 @@ qdr_link_t *qdr_create_link_CT(qdr_core_t        *core,
     link->core_ticks     = qdr_core_uptime_ticks(core);
     link->zero_credit_time = link->core_ticks;
     link->priority       = priority;
+    sys_atomic_init(&link->use_count, 2);  // 1 for caller, 1 for work item
 
     link->strip_annotations_in  = conn->strip_annotations_in;
     link->strip_annotations_out = conn->strip_annotations_out;
@@ -1801,23 +1792,11 @@ static void qdr_connection_notify_closed_CT(qdr_core_t *core, qdr_action_t *acti
     }
 
     //
-    // Remove the references in the links_with_work list
-    //
-    qdr_link_ref_t *link_ref;
-    for (int priority = 0; priority < QDR_N_PRIORITIES; ++ priority) {
-        link_ref = DEQ_HEAD(conn->links_with_work[priority]);
-        while (link_ref) {
-            qdr_del_link_ref(&conn->links_with_work[priority], link_ref->link, QDR_LINK_LIST_CLASS_WORK);
-            link_ref = DEQ_HEAD(conn->links_with_work[priority]);
-        }
-    }
-
-    //
     // TODO - Clean up links associated with this connection
     //        This involves the links and the dispositions of deliveries stored
     //        with the links.
     //
-    link_ref = DEQ_HEAD(conn->links);
+    qdr_link_ref_t *link_ref = DEQ_HEAD(conn->links);
     while (link_ref) {
         qdr_link_t *link = link_ref->link;
 
@@ -2474,18 +2453,40 @@ static void qdr_link_notify_closed_CT(qdr_core_t *core, qdr_action_t *action, bo
         }
     }
 
-    qdr_link_cleanup_protected_CT(core, link->conn, link,
-                                  action->args.connection.forced_close
-                                  ? "Link forced closed" : "Link closed");
+    // The core may now release its reference to the link allowing it to be freed
+    qdr_link_drop_use_count(link);
 }
 
 
-static void qdr_link_processing_complete_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
+// Helper for qdr_link_drop_use_count
+//
+static void link_cleanup_on_core_CT(qdr_core_t *core, qdr_action_t *action, bool discard)
 {
-    qdr_link_t *link = safe_deref_qdr_link_t(action->args.connection.link);
-    if (discard || !link)
-        return;
-
-    qdr_link_cleanup_CT(core, link->conn, link, "Link cleanup deferred after IO processing");
+    if (!discard) {  // core will free all links on shutdown so no need to cleanup here
+        qdr_connection_t *conn = safe_deref_qdr_connection_t(action->args.connection.conn);
+        qdr_link_t       *link = safe_deref_qdr_link_t(action->args.connection.link);
+        if (link && conn) {
+            qdr_link_cleanup_CT(core, conn, link, "link closed");
+        }
+    }
 }
 
+// This may be called by the core or I/O threads when the link is no longer in use
+//
+void qdr_link_drop_use_count(qdr_link_t *link)
+{
+    uint32_t uc = sys_atomic_dec(&link->use_count);
+    assert(uc > 0);  // underflow error
+    if (uc == 1) {
+        // The link can only be freed on the core thread (or main if shutting down)
+        sys_thread_role_t role = sys_thread_role(0);
+        if (role == SYS_THREAD_CORE || role == SYS_THREAD_MAIN) {
+            qdr_link_cleanup_CT(link->core, link->conn, link, "Link closed");
+        } else {
+            qdr_action_t *action = qdr_action(link_cleanup_on_core_CT, "link_cleanup");
+            set_safe_ptr_qdr_connection_t(link->conn, &action->args.connection.conn);
+            set_safe_ptr_qdr_link_t(link, &action->args.connection.link);
+            qdr_action_enqueue(link->core, action);
+        }
+    }
+}

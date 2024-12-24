@@ -312,15 +312,13 @@ void qdr_forward_deliver_CT(qdr_core_t *core, qdr_link_t *out_link, qdr_delivery
         work->value     = 1;
         DEQ_INSERT_TAIL(out_link->work_list, work);
     }
-    qdr_add_link_ref(&out_link->conn->links_with_work[out_link->priority], out_link, QDR_LINK_LIST_CLASS_WORK);
-
     out_dlv->link_work = qdr_link_work_getref(work);
     sys_mutex_unlock(&out_link->conn->work_lock);
 
     //
-    // Activate the outgoing connection for later processing.
+    // Activate the connection for outgoing link processing
     //
-    qdr_connection_activate_CT(core, out_link->conn);
+    qdr_connection_schedule_link_CT(out_link->conn, out_link);
 }
 
 

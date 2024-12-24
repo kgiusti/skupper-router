@@ -884,29 +884,6 @@ qdr_delivery_t *qdr_link_deliver_to_core(qdr_link_t *link, qd_message_t *msg, bo
 int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit);
 
 
-/**
- * qdr_link_complete_sent_message
- *
- * If an outgoing message is completed outside of the context of the link_deliver callback,
- * this function must be called to inform the router core that the delivery on the head of
- * the link's undelivered list can be moved out of that list.  Ensure that the send-complete
- * status of the message has been set before calling this function.  This function will check
- * the send-complete status of the head delivery on the link's undelivered list.  If it is
- * true, that delivery will be removed from the undelivered list.
- *
- * DO NOT call this function from within the link_deliver callback.  Use it only if you must
- * asynchronously complete the sending of the current message.
- *
- * This will typically occur when a message delivered to the protocol adaptor cannot be sent
- * on the wire due to back-pressure.  In this case, the removal of the back pressure is the
- * stimulus for completing the send of the message.
- *
- * @param core Pointer to the router core object
- * @param link Pointer to the link on which the head delivery has been completed
- */
-void qdr_link_complete_sent_message(qdr_core_t *core, qdr_link_t *link);
-
-
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode);
 
 /**

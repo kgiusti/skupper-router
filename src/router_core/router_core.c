@@ -216,7 +216,6 @@ void qdr_core_free(qdr_core_t *core)
             qdrc_endpoint_do_cleanup_CT(core, link->core_endpoint);
 
         qdr_del_link_ref(&link->conn->links, link, QDR_LINK_LIST_CLASS_CONNECTION);
-        qdr_del_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
         free(link->name);
         free(link->disambiguated_name);
         free(link->terminus_addr);
@@ -1077,9 +1076,11 @@ void qdr_reset_sheaf(qdr_core_t *core, uint8_t n)
 
 void qdr_connection_work_free_CT(qdr_connection_work_t *work)
 {
-    qdr_terminus_free(work->source);
-    qdr_terminus_free(work->target);
-    free_qdr_connection_work_t(work);
+    if (work) {
+        qdr_terminus_free(work->source);
+        qdr_terminus_free(work->target);
+        free_qdr_connection_work_t(work);
+    }
 }
 
 static void qdr_post_global_stats_response(qdr_core_t *core, qdr_general_work_t *work, bool discard)

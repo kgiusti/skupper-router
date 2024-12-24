@@ -1178,10 +1178,11 @@ void qdr_delivery_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, bo
 
         qdr_link_t *peer_link = qdr_delivery_link(peer);
         if (!!peer_link) {
-            bool reuse_link = false;
-            sys_mutex_lock(&peer_link->conn->work_lock);
             qdr_link_work_t *work     = peer->link_work;
-            bool             activate = false;
+            bool             schedule_peer = false;
+            bool             reuse_link = false;
+
+            sys_mutex_lock(&peer_link->conn->work_lock);
 
             if (peer_link->streaming && !more) {
                 if (!peer_link->in_streaming_pool) {
@@ -1196,18 +1197,13 @@ void qdr_delivery_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, bo
             }
 
             //
-            // Determines if the peer connection can be activated.
+            // Determines if the peer link needs to be scheduled for connection work.
             // For a large message, the peer delivery's link_work MUST be at the head of the peer link's work list. This link work is only removed
             // after the streaming message has been sent.
             //
             if (!!work) {
                 if (work->processing || work == DEQ_HEAD(peer_link->work_list)) {
-                    qdr_add_link_ref(&peer_link->conn->links_with_work[peer_link->priority], peer_link, QDR_LINK_LIST_CLASS_WORK);
-
-                    //
-                    // Activate the outgoing connection for later processing.
-                    //
-                    activate = true;
+                    schedule_peer = true;
                 }
             }
             sys_mutex_unlock(&peer_link->conn->work_lock);
@@ -1217,8 +1213,9 @@ void qdr_delivery_continue_peers_CT(qdr_core_t *core, qdr_delivery_t *in_dlv, bo
                        "[C%" PRIu64 "][L%" PRIu64 "] Returning streaming link %s to free pool",
                        peer_link->conn->identity, peer_link->identity, peer_link->name);
 
-            if (activate)
-                qdr_connection_activate_CT(core, peer_link->conn);
+            if (schedule_peer) {
+                qdr_connection_schedule_link_CT(peer_link->conn, peer_link);
+            }
         }
 
         peer = qdr_delivery_next_peer_CT(in_dlv);
@@ -1324,22 +1321,19 @@ void qdr_delivery_push_CT(qdr_core_t *core, qdr_delivery_t *dlv)
     if (!link)
         return;
 
-    bool activate = false;
+    bool schedule_link = false;
 
     sys_mutex_lock(&link->conn->work_lock);
     if (dlv->where != QDR_DELIVERY_IN_UNDELIVERED) {
         qdr_delivery_incref(dlv, "qdr_delivery_push_CT - add to updated list");
         qdr_add_delivery_ref_CT(&link->updated_deliveries, dlv);
-        qdr_add_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
-        activate = true;
+        schedule_link = true;
     }
     sys_mutex_unlock(&link->conn->work_lock);
 
-    //
-    // Activate the connection
-    //
-    if (activate)
-        qdr_connection_activate_CT(core, link->conn);
+    if (schedule_link) {
+        qdr_connection_schedule_link_CT(link->conn, link);
+    }
 }
 
 

@@ -271,8 +271,8 @@ typedef enum {
     QDR_CONNECTION_WORK_FIRST_ATTACH,
     QDR_CONNECTION_WORK_SECOND_ATTACH,
     QDR_CONNECTION_WORK_TRACING_ON,
-    QDR_CONNECTION_WORK_TRACING_OFF
-
+    QDR_CONNECTION_WORK_TRACING_OFF,
+    QDR_CONNECTION_WORK_PROCESS_LINK,
 } qdr_connection_work_type_t;
 
 typedef struct qdr_connection_work_t {
@@ -416,10 +416,8 @@ void qdr_add_delivery_ref_CT(qdr_delivery_ref_list_t *list, qdr_delivery_t *dlv)
 void qdr_del_delivery_ref(qdr_delivery_ref_list_t *list, qdr_delivery_ref_t *ref);
 
 #define QDR_LINK_LIST_CLASS_ADDRESS    0
-#define QDR_LINK_LIST_CLASS_WORK       1
-#define QDR_LINK_LIST_CLASS_CONNECTION 2
-#define QDR_LINK_LIST_CLASS_LOCAL      3
-#define QDR_LINK_LIST_CLASSES          4
+#define QDR_LINK_LIST_CLASS_CONNECTION 1
+#define QDR_LINK_LIST_CLASSES          2
 
 typedef enum {
     QDR_LINK_OPER_UP,
@@ -470,6 +468,7 @@ struct qdr_link_t {
     qdr_delivery_list_t      settled;            ///< Settled deliveries
     qdr_delivery_ref_list_t  updated_deliveries; ///< References to deliveries (in the unsettled list) with updates.
     qdr_link_oper_status_t   oper_status;
+    sys_atomic_t             use_count;         ///< Cannot free this link until there are no more users
     int                      capacity;
     int                      credit_to_core;    ///< Number of the available credits incrementally given to the core
     int                      credit_pending;    ///< Number of credits to be issued once consumers are available
@@ -483,8 +482,6 @@ struct qdr_link_t {
     bool                     drain_mode;
     bool                     stalled_outbound;  ///< Indicates that this link is stalled on outbound buffer backpressure
     bool                     edge;              ///< True if this link is in an edge-connection
-    bool                     processing;        ///< True if an IO thread is currently handling this link
-    bool                     ready_to_free;     ///< True if the core thread wanted to clean up the link but it was processing
     bool                     streaming;         ///< True if this link can be reused for streaming msgs
     bool                     in_streaming_pool; ///< True if this link is in the connections standby pool STREAMING_POOL
     bool                     user_streaming;    ///< True if this link can be used to transfer a stream (requested by the in-process attacher)
@@ -494,6 +491,7 @@ struct qdr_link_t {
     bool                     no_route_bound;    ///< Has the no_route link been bound ? Has the link's owning address been set for no_route links ?
     bool                     proxy;             ///< True if this link represents endpoints on a remote router (used on edge router only)
     bool                     edge_reachable;    ///< The last reachability state sent to the edge (only for edge inlinks on an interior router)
+    bool                     is_scheduled;      ///< Currently scheduled on the conn work list. MUST hold parent conn work lock!
     sys_atomic_t             streaming_deliveries;  ///< If true, set the streaming bit in the router annotations for arriving deliveries
     char                    *strip_prefix;
     char                    *insert_prefix;
@@ -517,6 +515,7 @@ struct qdr_link_t {
     uint64_t  conn_id;
 
     DEQ_LINKS_N(STREAMING_POOL, qdr_link_t);
+    DEQ_LINKS_N(CONN_WORK, qdr_link_t);
 };
 DEQ_DECLARE(qdr_link_t, qdr_link_list_t);
 
@@ -692,7 +691,6 @@ struct qdr_connection_t {
     qdr_connection_work_list_t  work_list;
     sys_mutex_t                 work_lock;
     qdr_link_ref_list_t         links;
-    qdr_link_ref_list_t         links_with_work[QDR_N_PRIORITIES];
     qdr_connection_info_t      *connection_info;
     void                       *user_context; /* Updated from IO thread, use work_lock */
     qd_conn_oper_status_t       oper_status;
@@ -989,6 +987,7 @@ void qdr_edge_connection_closed(qdr_edge_t *edge);
 void qdr_link_cleanup_deliveries_CT(qdr_core_t *core, qdr_connection_t *conn, qdr_link_t *link, bool on_shutdown);
 void qdr_link_deliver_CT(qdr_core_t *core, qdr_action_t *action, bool discard);
 
+void qdr_connection_schedule_link_CT(qdr_connection_t *conn, qdr_link_t *link);
 void qdr_connection_enqueue_work_CT(qdr_core_t            *core,
                                     qdr_connection_t      *conn,
                                     qdr_connection_work_t *work);

@@ -295,56 +295,6 @@ int qdr_link_process_deliveries(qdr_core_t *core, qdr_link_t *link, int credit)
 }
 
 
-void qdr_link_complete_sent_message(qdr_core_t *core, qdr_link_t *link)
-{
-    if (!link || !link->conn)
-        return;
-
-    qdr_connection_t *conn     = link->conn;
-    bool              activate = false;
-
-    sys_mutex_lock(&conn->work_lock);
-    qdr_delivery_t *dlv = DEQ_HEAD(link->undelivered);
-    if (!!dlv && qdr_delivery_send_complete(dlv)) {
-        DEQ_REMOVE_HEAD(link->undelivered);
-        if (dlv->link_work) {
-            // ensure deliveries are sent in order:
-            assert(dlv->link_work == DEQ_HEAD(link->work_list));
-            assert(dlv->link_work->value > 0);
-            if (--dlv->link_work->value == 0) {
-                DEQ_REMOVE_HEAD(link->work_list);
-                qdr_link_work_release(dlv->link_work);  // for work_list ref
-            }
-            qdr_link_work_release(dlv->link_work);  // for dlv ref
-            dlv->link_work = 0;
-        }
-
-        if (!dlv->settled && !qdr_delivery_oversize(dlv) && !qdr_delivery_is_aborted(dlv)) {
-            DEQ_INSERT_TAIL(link->unsettled, dlv);
-            dlv->where = QDR_DELIVERY_IN_UNSETTLED;
-            qd_log(LOG_ROUTER_CORE, QD_LOG_DEBUG,
-                   DLV_FMT " Delivery transfer:  qdr_link_complete_sent_message: undelivered-list -> unsettled-list",
-                   DLV_ARGS(dlv));
-        } else {
-            dlv->where = QDR_DELIVERY_NOWHERE;
-            qdr_delivery_decref(core, dlv, "qdr_link_complete_sent_message - removed from undelivered");
-        }
-
-        //
-        // If there's another delivery on the undelivered list, get the outbound process moving again.
-        //
-        if (DEQ_SIZE(link->undelivered) > 0) {
-            qdr_add_link_ref(&conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
-            activate = true;
-        }
-    }
-    sys_mutex_unlock(&conn->work_lock);
-
-    if (activate)
-        conn->protocol_adaptor->activate_handler(conn->protocol_adaptor->user_context, conn);
-}
-
-
 void qdr_link_flow(qdr_core_t *core, qdr_link_t *link, int credit, bool drain_mode)
 {
     qdr_action_t *action = qdr_action(qdr_link_flow_CT, "link_flow");
@@ -418,7 +368,7 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
 
     int  credit           = action->args.connection.credit;
     bool drain            = action->args.connection.drain;
-    bool activate         = false;
+    bool schedule_link    = false;
     bool drain_was_set    = !link->drain_mode && drain;
     qdr_link_work_t *work = 0;
 
@@ -453,8 +403,7 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
             if (work)
                 DEQ_INSERT_TAIL(link->work_list, work);
             if (DEQ_SIZE(link->undelivered) > 0 || drain_was_set) {
-                qdr_add_link_ref(&link->conn->links_with_work[link->priority], link, QDR_LINK_LIST_CLASS_WORK);
-                activate = true;
+                schedule_link = true;
             }
             sys_mutex_unlock(&link->conn->work_lock);
         }
@@ -467,8 +416,9 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
     //
     // Activate the connection if we have deliveries to send or drain mode was set.
     //
-    if (activate)
-        qdr_connection_activate_CT(core, link->conn);
+    if (schedule_link) {
+        qdr_connection_schedule_link_CT(link->conn, link);
+    }
 }
 
 
@@ -972,9 +922,13 @@ void qdr_addr_start_inlinks_CT(qdr_core_t *core, qdr_address_t *addr)
 //
 bool qdr_link_is_idle_CT(const qdr_link_t *link)
 {
-    return (DEQ_SIZE(link->undelivered) == 0 &&
+    sys_mutex_lock(&link->conn->work_lock);
+    size_t work_ct = DEQ_SIZE(link->work_list);
+    sys_mutex_unlock(&link->conn->work_lock);
+
+    return (work_ct == 0 &&
+            DEQ_SIZE(link->undelivered) == 0 &&
             DEQ_SIZE(link->unsettled) == 0 &&
             DEQ_SIZE(link->settled) == 0 &&
-            DEQ_SIZE(link->updated_deliveries) == 0 &&
-            !link->ref[QDR_LINK_LIST_CLASS_WORK]);
+            DEQ_SIZE(link->updated_deliveries) == 0);
 }
