@@ -2096,6 +2096,7 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         return 0;
 
     if (qdr_delivery_is_abort_outbound(dlv)) {
+        qd_log(LOG_ROUTER, QD_LOG_DEBUG, "Detected qdr_delivery_is_abort_outbound!");
         pn_delivery_abort(pdlv);
         pn_link_advance(plink);
         qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
@@ -2144,6 +2145,7 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
         if (qd_message_aborted(msg_out)) {
             // Aborted messages must be settled locally
             // Settling does not produce any disposition to message sender.
+            qd_log(LOG_ROUTER, QD_LOG_DEBUG, "qd_message_aborted is true!");
             if (pdlv) {
                 pn_link_advance(plink);
                 qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
@@ -2161,6 +2163,7 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
 
             if (settled || remote_snd_settled) {
                 if (pdlv) {
+                    qd_log(LOG_ROUTER, QD_LOG_DEBUG, "send complete and setteld????");
                     qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
                     pn_delivery_settle(pdlv);
                 }
