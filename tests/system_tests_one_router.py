@@ -2579,6 +2579,7 @@ class LargeMessageStreamCloseConnTest(MessagingHandler):
         self.receiver = None
         self.body = ""
         self.aborted = False
+        self.received = 0
         for i in range(20000):
             self.body += "0123456789101112131415"
 
@@ -2611,8 +2612,13 @@ class LargeMessageStreamCloseConnTest(MessagingHandler):
         self.sender_conn.close()
 
     def on_message(self, event):
-        self.timer.cancel()
-        self.receiver_conn.close()
+        self.received += 1
+        if self.received >= 100:
+            self.timer.cancel()
+            self.receiver_conn.close()
+        else:
+            self.sender_conn = event.container.connect(self.address)
+            self.sender = event.container.create_sender(self.sender_conn, self.dest)
 
     def on_aborted(self, event):
         self.aborted = True
