@@ -1278,17 +1278,38 @@ static void AMQP_link_closed_handler(qd_router_t *router, qd_link_t *qd_link, bo
             qdr_delivery_t *dlv = (qdr_delivery_t *) (lref ? lref->ref : 0);
             if (msg) {
 
+                
                 if (dlv) {
                     qd_log(LOG_ROUTER, QD_LOG_DEBUG, DLV_FMT " LINK CLOSED CURRENT DLV rc=%s a=%s sc=%s", DLV_ARGS(dlv),
                            qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
                            qd_message_aborted(msg) ? "TRUE" : "FALSE",
                            qd_message_send_complete(msg) ? "TRUE" : "FALSE");
+
+
+                    if (!qd_message_receive_complete(msg)) {
+                        qd_link_set_q2_limit_unbounded(qd_link, true);
+                        // since this thread owns link we can call the
+                        // rx_hander directly rather than schedule it via
+                        // the unblock handler:
+                        qd_message_clear_q2_unblocked_handler(msg);
+                        qd_message_Q2_holdoff_disable(msg);
+                        while (AMQP_rx_handler(router, qd_link))
+                            ;
+
+                        qd_log(LOG_ROUTER, QD_LOG_DEBUG, DLV_FMT " LINK CLOSED CURRENT DLV rc=%s a=%s sc=%s", DLV_ARGS(dlv),
+                               qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
+                               qd_message_aborted(msg) ? "TRUE" : "FALSE",
+                               qd_message_send_complete(msg) ? "TRUE" : "FALSE");
+                    }
+                    
                 } else {
                     qd_log(LOG_ROUTER, QD_LOG_DEBUG, "LINK CLOSED CURRENT DLV rc=%s a=%s sc=%s",
                            qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
                            qd_message_aborted(msg) ? "TRUE" : "FALSE",
                            qd_message_send_complete(msg) ? "TRUE" : "FALSE");
                 }
+            } else {
+                qd_log(LOG_ROUTER, QD_LOG_DEBUG, "[L%"PRIu64"] pn_delivery still current, no msg!", qd_link_link_id(qd_link));
             }
         }
     }
