@@ -1209,6 +1209,8 @@ static int AMQP_link_detach_handler(qd_router_t *router, qd_link_t *link)
 {
     assert(link);
 
+    qd_log(LOG_ROUTER, QD_LOG_DEBUG, "[L%"PRIu64"] link detached handler", qd_link_link_id(link));
+
     pn_link_t *pn_link = qd_link_pn(link);
     if (!pn_link)
         return 0;
@@ -1265,6 +1267,32 @@ static void AMQP_link_closed_handler(qd_router_t *router, qd_link_t *qd_link, bo
 {
     assert(qd_link);
 
+    qd_log(LOG_ROUTER, QD_LOG_DEBUG, "[L%"PRIu64"] link closed handler", qd_link_link_id(qd_link));
+
+    pn_link_t      *pn_link = qd_link_pn(qd_link);
+    if (pn_link && pn_link_is_receiver(pn_link)) {
+        pn_delivery_t *pnd = pn_link_current(pn_link);
+        if (pnd) {
+            qd_message_t *msg = qd_get_message_context(pnd);
+            qd_link_ref_t *lref = (qd_link_ref_t *)pn_delivery_get_context(pnd);
+            qdr_delivery_t *dlv = (qdr_delivery_t *) (lref ? lref->ref : 0);
+            if (msg) {
+
+                if (dlv) {
+                    qd_log(LOG_ROUTER, QD_LOG_DEBUG, DLV_FMT " LINK CLOSED CURRENT DLV rc=%s a=%s sc=%s", DLV_ARGS(dlv),
+                           qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
+                           qd_message_aborted(msg) ? "TRUE" : "FALSE",
+                           qd_message_send_complete(msg) ? "TRUE" : "FALSE");
+                } else {
+                    qd_log(LOG_ROUTER, QD_LOG_DEBUG, "LINK CLOSED CURRENT DLV rc=%s a=%s sc=%s",
+                           qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
+                           qd_message_aborted(msg) ? "TRUE" : "FALSE",
+                           qd_message_send_complete(msg) ? "TRUE" : "FALSE");
+                }
+            }
+        }
+    }
+
     // Clean up all qdr_delivery/pn_delivery bindings for the link.
 
     qd_link_ref_list_t *list = qd_link_get_ref_list(qd_link);
@@ -1274,6 +1302,18 @@ static void AMQP_link_closed_handler(qd_router_t *router, qd_link_t *qd_link, bo
         qdr_delivery_t *dlv = (qdr_delivery_t*) ref->ref;
         pn_delivery_t *pdlv = qdr_delivery_get_context(dlv);
         assert(pdlv && ref == (qd_link_ref_t*) pn_delivery_get_context(pdlv));
+
+        {
+            qd_message_t *msg = qdr_delivery_message(dlv);
+            if (msg) {
+                qd_log(LOG_ROUTER, QD_LOG_DEBUG, DLV_FMT " LINK CLOSED DLV NO MSG", DLV_ARGS(dlv));
+            } else {
+                qd_log(LOG_ROUTER, QD_LOG_DEBUG, "LINK CLOSED A DLV rc=%s a=%s sc=%s",
+                       qd_message_receive_complete(msg) ? "TRUE" : "FALSE",
+                       qd_message_aborted(msg) ? "TRUE" : "FALSE",
+                       qd_message_send_complete(msg) ? "TRUE" : "FALSE");
+            }
+        }
 
         // This will decrement the qdr_delivery_t reference count - do not access the dlv pointer after this call!
         qdr_node_disconnect_deliveries(router->router_core, qd_link, dlv, pdlv);
