@@ -84,29 +84,38 @@ struct qd_ssl2_profile_t {
     char *uid_name_mapping_file;
 
     /**
-     * version: Version assigned to the current configuration
-     * oldest_valid_version: Previous sslProfile updates with versions values < oldest_valid_version have expired.
+     * Certificate Rotation
+     * ordinal: Identifies the current configuration's revision
+     * oldest_valid_ordinal: Previous configurations with ordinal values < oldest_valid_ordinal have expired.
      */
-    long version;
-    long oldest_valid_version;
+    uint64_t ordinal;
+    uint64_t oldest_valid_ordinal;
 };
 
 /**
- * Create a new TLS qd_tls_config_t instance with the given configuration
+ * Create a new TLS qd_tls_config_t instance with the given configuration. This is called when a listener/connector
+ * record is created.
  *
  * @param ssl_profile_name the name of the sslProfile configuration to use
  * @param p_type protocol type for the child connections (TCP or AMQP)
  * @param mode the operational use case (TLS Server or Client)
  * @param verify_hostname enforce host name checking (Client mode)
  * @param authenticate_peer validate peer's certificate (Server mode)
+ * @param update_cb_context Opaque handle passed to ordinal update callback.
+ * @param callback Optional callback invoked when ordinal or last_valid_ordinal
+ *        is modified by management.
  *
  * @return a new qd_tls_config_t instance or 0 on error. qd_error() set if error.
  */
+
+typedef void (*qd_tls_ordinal_update_cb_t)(uint64_t ordinal, uint64_t oldest_valid_ordinal, void *context);
 qd_tls_config_t *qd_tls_config(const char *ssl_profile_name,
                                qd_tls_type_t p_type,
                                qd_tls_config_mode_t mode,
                                bool verify_hostname,
-                               bool authenticate_peer);
+                               bool authenticate_peer,
+                               void *update_cb_context,
+                               qd_tls_ordinal_update_cb_t callback);
 
 
 /**

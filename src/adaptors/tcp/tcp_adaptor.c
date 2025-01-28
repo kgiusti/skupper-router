@@ -2384,7 +2384,8 @@ QD_EXPORT void *qd_dispatch_configure_tcp_listener(qd_dispatch_t *qd, qd_entity_
                                              QD_TLS_TYPE_PROTON_RAW,
                                              QD_TLS_CONFIG_SERVER_MODE,
                                              listener->adaptor_config->verify_host_name,
-                                             listener->adaptor_config->authenticate_peer);
+                                             listener->adaptor_config->authenticate_peer,
+                                             0, 0);
         if (!listener->tls_config) {
             qd_log(LOG_TCP_ADAPTOR, QD_LOG_ERROR, "tcpListener %s TLS configuration failed: %s",
                    listener->adaptor_config->name, qd_error_message());
@@ -2590,7 +2591,8 @@ qd_tcp_connector_t *qd_dispatch_configure_tcp_connector(qd_dispatch_t *qd, qd_en
                                               QD_TLS_TYPE_PROTON_RAW,
                                               QD_TLS_CONFIG_CLIENT_MODE,
                                               connector->adaptor_config->verify_host_name,
-                                              connector->adaptor_config->authenticate_peer);
+                                              connector->adaptor_config->authenticate_peer,
+                                              0, 0);
         if (!connector->tls_config) {
             qd_log(LOG_TCP_ADAPTOR, QD_LOG_ERROR, "tcpConnector %s TLS configuration failed: %s",
                    connector->adaptor_config->name, qd_error_message());

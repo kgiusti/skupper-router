@@ -74,7 +74,8 @@ QD_EXPORT qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_en
                                        QD_TLS_TYPE_PROTON_AMQP,
                                        QD_TLS_CONFIG_SERVER_MODE,
                                        li->config.verify_host_name,
-                                       li->config.ssl_require_peer_authentication);
+                                       li->config.ssl_require_peer_authentication,
+                                       0, 0);
         if (!li->tls_config) {
             // qd_tls_config() sets qd_error_message():
             qd_log(LOG_CONN_MGR, QD_LOG_ERROR, "Failed to configure TLS for Listener %s: %s",
@@ -293,7 +294,8 @@ QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_
                                            QD_TLS_TYPE_PROTON_AMQP,
                                            QD_TLS_CONFIG_CLIENT_MODE,
                                            ct->config.verify_host_name,
-                                           ct->config.ssl_require_peer_authentication);
+                                           ct->config.ssl_require_peer_authentication,
+                                           0, 0);
             if (!ct->tls_config) {
                 // qd_tls2_config() has set the qd_error_message(), which is logged below
                 goto error;
@@ -323,7 +325,8 @@ QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_
                                                    QD_TLS_TYPE_PROTON_AMQP,
                                                    QD_TLS_CONFIG_CLIENT_MODE,
                                                    ct->config.verify_host_name,
-                                                   ct->config.ssl_require_peer_authentication);
+                                                   ct->config.ssl_require_peer_authentication,
+                                                   0, 0);
                     if (!dc->tls_config) {
                         // qd_tls2_config() has set the qd_error_message(), which is logged below
                         qd_connector_decref(dc);
