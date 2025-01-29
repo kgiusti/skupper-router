@@ -67,7 +67,11 @@ typedef struct qd_connector_t {
     qd_failover_item_list_t   conn_info_list;
     int                       conn_index; // Which connection in the connection list to connect to next.
     char                     *policy_vhost;  /* Optional policy vhost name */
+
+    // TLS Configuration. Keep a local copy of the TLS ordinals to monitor changes by management
     qd_tls_config_t          *tls_config;
+    uint64_t                  tls_ordinal;
+    uint64_t                  tls_oldest_valid_ordinal;
 
     /* Connection group state */
     bool is_data_connector;
@@ -106,4 +110,7 @@ void qd_connector_add_link(qd_connector_t *connector);
 // NOTE WELL: this may free the connector if the connection is holding the last
 // reference to it
 void qd_connector_remove_connection(qd_connector_t *connector, bool final, const char *condition_name, const char *condition_description);
+
+void qd_connector_update_tls_ordinal(qd_connector_t *connector, uint64_t new_ordinal);
+void qd_connector_update_tls_oldest_valid_ordinal(qd_connector_t *connector, uint64_t new_oldest_valid_ordinal);
 #endif

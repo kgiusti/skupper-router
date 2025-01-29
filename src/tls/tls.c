@@ -234,7 +234,7 @@ qd_tls_config_t *qd_tls_config(const char *ssl_profile_name,
                                bool verify_hostname,
                                bool authenticate_peer,
                                void *update_cb_context,
-                               qd_tls_ordinal_update_cb_t callback)
+                               qd_tls_config_update_cb_t update_cb)
 {
     ASSERT_MGMT_THREAD;  // called from listener/connector create callback
 
@@ -292,8 +292,8 @@ qd_tls_config_t *qd_tls_config(const char *ssl_profile_name,
     tls_config->is_listener       = is_listener;
     tls_config->p_type            = p_type;
     tls_config->proton_tls_cfg    = qd_proton_config(pn_raw_config, pn_amqp_config);
-    tls_config->ordinal_update_callback = callback;
-    tls_config->ordinal_update_context  = update_cb_context;
+    tls_config->update_callback   = update_cb;
+    tls_config->update_context    = update_cb_context;
 
     DEQ_INSERT_TAIL(tls_context->tls_configs, tls_config);
 
@@ -316,6 +316,38 @@ void qd_tls_config_decref(qd_tls_config_t *tls_config)
             sys_mutex_free(&tls_config->lock);
             free_qd_tls_config_t(tls_config);
         }
+    }
+}
+
+
+uint64_t qd_tls_config_get_ordinal(const qd_tls_config_t *config)
+{
+    // config->ordinal can be changed via management. Calling this from any other thread risks returning a stale value.
+    ASSERT_MGMT_THREAD;
+
+    return config->ordinal;
+}
+
+
+uint64_t qd_tls_config_get_oldest_valid_ordinal(const qd_tls_config_t *config)
+{
+    // config->oldest_valid_ordinal can be changed via management. Calling this from any other thread risks returning a
+    // stale value.
+    ASSERT_MGMT_THREAD;
+
+    return config->oldest_valid_ordinal;
+}
+
+
+void qd_tls_config_cancel_update_callback(qd_tls_config_t *config)
+{
+    // Since this function can only be called on the mgmt thread there is no chance that the handler is being run while
+    // it is being cancelled.
+    ASSERT_MGMT_THREAD;
+
+    if (config) {
+        config->update_callback = 0;
+        config->update_context = 0;
     }
 }
 
@@ -595,6 +627,12 @@ int qd_tls_session_get_ssf(const qd_tls_session_t *tls_session)
 }
 
 
+uint64_t qd_tls_session_get_profile_ordinal(const qd_tls_session_t *session)
+{
+    return session->ordinal;
+}
+
+
 qd_ssl2_profile_t *qd_tls_read_ssl_profile(const char *ssl_profile_name, qd_ssl2_profile_t *profile)
 {
     ASSERT_MGMT_THREAD;
@@ -789,9 +827,6 @@ static qd_error_t _update_tls_config(qd_tls_config_t *tls_config, const qd_ssl2_
             break;
     }
 
-    bool ordinal_updated = profile->ordinal != tls_config->ordinal
-        || profile->oldest_valid_ordinal != tls_config->oldest_valid_ordinal;
-    
     qd_proton_config_t *new_cfg = qd_proton_config(pn_raw_config, pn_amqp_config);
     qd_proton_config_t *old_cfg = 0;
 
@@ -806,13 +841,14 @@ static qd_error_t _update_tls_config(qd_tls_config_t *tls_config, const qd_ssl2_
     tls_config->oldest_valid_ordinal = profile->oldest_valid_ordinal;
     free(tls_config->uid_format);
     tls_config->uid_format = CHECKED_STRDUP(profile->uid_format);
+
+    // Calling the callback under lock ensures that no new TLS sessions can be created using the updated
+    // configuration until after the callback is run.
+    if (tls_config->update_callback) {
+        tls_config->update_callback(tls_config, tls_config->update_context);
+    }
     sys_mutex_unlock(&tls_config->lock);
 
-    if (tls_config->ordinal_update_callback && ordinal_updated) {
-        tls_config->ordinal_update_callback(tls_config->ordinal,
-                                            tls_config->oldest_valid_ordinal,
-                                            tls_config->ordinal_update_context);
-    }
 
     // no need to hold the lock here because the decref is atomic and if this
     // is the last reference then by definition there are no other threads involved.

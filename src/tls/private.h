@@ -99,8 +99,10 @@ struct qd_tls_config_t {
     sys_atomic_t        ref_count;
     uint64_t            ordinal;               // lock must be held
     uint64_t            oldest_valid_ordinal;  // lock must be held
-    qd_tls_ordinal_update_cb_t  ordinal_update_callback;
-    void                       *ordinal_update_context;
+
+    // Invoked on management thread whenever sslProfile is updated
+    qd_tls_config_update_cb_t  update_callback;
+    void                      *update_context;
 
     bool                authenticate_peer;
     bool                verify_hostname;

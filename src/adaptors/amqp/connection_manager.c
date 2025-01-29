@@ -268,6 +268,24 @@ QD_EXPORT qd_error_t qd_entity_refresh_connector(qd_entity_t* entity, void *impl
 }
 
 
+// Handler invoked by mgmt thread whenever the sslProfile is updated for a given qd_connector_t. Check for changes to
+// the sslProfile ordinal and oldestValidOrdinal attributes.  Note this is called with the sslProfile lock held to
+// prevent new connections from being activated until after this call returns.
+//
+static void handle_connector_ssl_profile_mgmt_update(const qd_tls_config_t *config, void *context)
+{
+    uint64_t new_ordinal = qd_tls_config_get_ordinal(config);
+    uint64_t new_oldest_ordinal = qd_tls_config_get_oldest_valid_ordinal(config);
+    qd_connector_t *ct = (qd_connector_t *) context;
+
+    if (new_ordinal > ct->tls_ordinal)
+        qd_connector_update_tls_ordinal(ct, new_ordinal);
+
+    if (new_oldest_ordinal > ct->tls_oldest_valid_ordinal)
+        qd_connector_update_tls_oldest_valid_ordinal(ct, new_oldest_ordinal);
+}
+
+
 QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_entity_t *entity)
 {
     qd_connection_manager_t *cm = qd->connection_manager;
@@ -290,16 +308,20 @@ QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_
         // If an sslProfile is configured allocate a TLS config for this connector's connections
         //
         if (ct->config.ssl_profile_name) {
+            bool do_cb = !!strcmp(ct->config.role, "inter-router");
             ct->tls_config = qd_tls_config(ct->config.ssl_profile_name,
                                            QD_TLS_TYPE_PROTON_AMQP,
                                            QD_TLS_CONFIG_CLIENT_MODE,
                                            ct->config.verify_host_name,
                                            ct->config.ssl_require_peer_authentication,
-                                           0, 0);
+                                           ct,
+                                           do_cb ? handle_connector_ssl_profile_mgmt_update : 0);
             if (!ct->tls_config) {
                 // qd_tls2_config() has set the qd_error_message(), which is logged below
                 goto error;
             }
+            ct->tls_ordinal = qd_tls_config_get_ordinal(ct->tls_config);
+            ct->tls_oldest_valid_ordinal = qd_tls_config_get_oldest_valid_ordinal(ct->tls_config);
         }
 
         //
@@ -326,12 +348,15 @@ QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_
                                                    QD_TLS_CONFIG_CLIENT_MODE,
                                                    ct->config.verify_host_name,
                                                    ct->config.ssl_require_peer_authentication,
-                                                   0, 0);
+                                                   dc, handle_connector_ssl_profile_mgmt_update);
                     if (!dc->tls_config) {
                         // qd_tls2_config() has set the qd_error_message(), which is logged below
                         qd_connector_decref(dc);
                         goto error;
                     }
+
+                    dc->tls_ordinal = qd_tls_config_get_ordinal(dc->tls_config);
+                    dc->tls_oldest_valid_ordinal = qd_tls_config_get_oldest_valid_ordinal(dc->tls_config);
                 }
 
                 strncpy(dc->group_correlator, ct->group_correlator, QD_DISCRIMINATOR_SIZE);
@@ -558,6 +583,9 @@ QD_EXPORT void qd_connection_manager_delete_connector(qd_dispatch_t *qd, void *i
         qd_timer_t *timer = 0;
         bool        has_data_connectors = ct->config.has_data_connectors;
         void *dct = qd_connection_new_qd_deferred_call_t();
+
+        qd_tls_config_cancel_update_callback(ct->tls_config);
+
         sys_mutex_lock(&ct->lock);
         timer = ct->timer;
         ct->timer = 0;

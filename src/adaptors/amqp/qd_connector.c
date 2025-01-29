@@ -344,3 +344,20 @@ void qd_connector_remove_connection(qd_connector_t *connector, bool final, const
     // Drop reference held by connection.
     qd_connector_decref(connector);
 }
+
+
+void qd_connector_update_tls_ordinal(qd_connector_t *connector, uint64_t new_ordinal)
+{
+    qd_log(LOG_SERVER, QD_LOG_DEBUG,
+           "Connector %s new ordinal: %"PRIu64", previous: %"PRIu64,
+           connector->config.name, new_ordinal, connector->tls_ordinal);
+    connector->tls_ordinal = new_ordinal;
+}
+
+void qd_connector_update_tls_oldest_valid_ordinal(qd_connector_t *connector, uint64_t new_oldest_valid_ordinal)
+{
+    qd_log(LOG_SERVER, QD_LOG_DEBUG,
+           "Connector %s new oldest valid ordinal: %"PRIu64", previous: %"PRIu64,
+           connector->config.name, new_oldest_valid_ordinal, connector->tls_oldest_valid_ordinal);
+    connector->tls_oldest_valid_ordinal = new_oldest_valid_ordinal;
+}
