@@ -629,7 +629,9 @@ int qd_tls_session_get_ssf(const qd_tls_session_t *tls_session)
 
 uint64_t qd_tls_session_get_profile_ordinal(const qd_tls_session_t *session)
 {
-    return session->ordinal;
+    if (session)
+        return session->ordinal;
+    return 0;
 }
 
 

@@ -59,6 +59,24 @@ static void log_config(qd_server_config_t *c, const char *what, bool create)
 }
 
 
+// Handler invoked by mgmt thread whenever the sslProfile is updated for a given qd_listener_t. Check for changes to
+// the sslProfile ordinal and oldestValidOrdinal attributes.  Note this is called with the sslProfile lock held to
+// prevent new connections from being activated until after this call returns.
+//
+static void handle_listener_ssl_profile_mgmt_update(const qd_tls_config_t *config, void *context)
+{
+    uint64_t new_ordinal = qd_tls_config_get_ordinal(config);
+    uint64_t new_oldest_ordinal = qd_tls_config_get_oldest_valid_ordinal(config);
+    qd_listener_t *li = (qd_listener_t *) context;
+
+    if (new_ordinal > li->tls_ordinal)
+        qd_listener_update_tls_ordinal(li, new_ordinal);
+
+    if (new_oldest_ordinal > li->tls_oldest_valid_ordinal)
+        qd_listener_update_tls_oldest_valid_ordinal(li, new_oldest_ordinal);
+}
+
+
 QD_EXPORT qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_entity_t *entity)
 {
     qd_connection_manager_t *cm = qd->connection_manager;
@@ -70,12 +88,14 @@ QD_EXPORT qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_en
     }
 
     if (li->config.ssl_profile_name) {
+        bool do_cb = strcmp(li->config.role, "inter-router") == 0;
         li->tls_config = qd_tls_config(li->config.ssl_profile_name,
                                        QD_TLS_TYPE_PROTON_AMQP,
                                        QD_TLS_CONFIG_SERVER_MODE,
                                        li->config.verify_host_name,
                                        li->config.ssl_require_peer_authentication,
-                                       0, 0);
+                                       li,
+                                       do_cb ? handle_listener_ssl_profile_mgmt_update : 0);
         if (!li->tls_config) {
             // qd_tls_config() sets qd_error_message():
             qd_log(LOG_CONN_MGR, QD_LOG_ERROR, "Failed to configure TLS for Listener %s: %s",
@@ -83,6 +103,8 @@ QD_EXPORT qd_listener_t *qd_dispatch_configure_listener(qd_dispatch_t *qd, qd_en
             qd_listener_decref(li);
             return 0;
         }
+        li->tls_ordinal = qd_tls_config_get_ordinal(li->tls_config);
+        li->tls_oldest_valid_ordinal = qd_tls_config_get_oldest_valid_ordinal(li->tls_config);
     }
 
     char *fol = qd_entity_opt_string(entity, "failoverUrls", 0);
@@ -308,7 +330,7 @@ QD_EXPORT qd_connector_t *qd_dispatch_configure_connector(qd_dispatch_t *qd, qd_
         // If an sslProfile is configured allocate a TLS config for this connector's connections
         //
         if (ct->config.ssl_profile_name) {
-            bool do_cb = !!strcmp(ct->config.role, "inter-router");
+            bool do_cb = strcmp(ct->config.role, "inter-router") == 0;
             ct->tls_config = qd_tls_config(ct->config.ssl_profile_name,
                                            QD_TLS_TYPE_PROTON_AMQP,
                                            QD_TLS_CONFIG_CLIENT_MODE,
