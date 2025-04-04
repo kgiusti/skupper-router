@@ -154,6 +154,7 @@ typedef struct qd_tcp_connection_t {
         uint64_t                last_update;  // ingress: last byte count value received in PN_RECEIVED
         uint64_t                pending_ack;  // egress: bytes sent since last PN_RECEIVED generated
         uint64_t                closed_count; // ingress: total count of window closures
+        uint64_t                opened_count; // ingress: total count of window closures
         bool                    disabled;     // window flow control disabled, no backpressure allowed
     } window;
     bool                        listener_side;

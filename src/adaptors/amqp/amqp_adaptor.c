@@ -1142,6 +1142,8 @@ static int AMQP_link_flow_handler(qd_router_t *router, qd_link_t *link)
         if (qd_session_get_outgoing_capacity(qd_ssn) >= qd_session_get_outgoing_capacity_low_threshold(qd_ssn)) {
             // yes.  We must now unblock all links that have been blocked by Q3
 
+            qd_session_mark_unblocked(qd_ssn);
+            
             qd_link_list_t  *blinks = qd_session_q3_blocked_links(qd_ssn);
             qd_link_t       *blink  = DEQ_HEAD(*blinks);
             qd_connection_t *conn   = qd_link_connection(blink);

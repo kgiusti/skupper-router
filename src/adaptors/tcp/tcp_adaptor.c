@@ -684,6 +684,12 @@ static void close_connection_XSIDE_IO(qd_tcp_connection_t *conn)
     sys_mutex_unlock(&conn->activation_lock);
     // Do NOT free the core_activation lock since the core may be holding it
 
+    if (conn->window.closed_count || conn->window.opened_count) {
+        qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO, "[C%"PRIu64"] Mick: window closed=%"PRIu64" opened=%"PRIu64"%s",
+               conn->conn_id,
+               conn->window.closed_count, conn->window.opened_count,
+               conn->window.closed_count > conn->window.opened_count ? "!!!" : "");
+    }
     // Pass connection to Core for final deallocation. The Core will free the activation_lock and the related flags.  See
     // qdr_core_free_tcp_resource_CT()
     free_tcp_resource(&conn->common);
@@ -1342,6 +1348,8 @@ static bool manage_flow_XSIDE_IO(qd_tcp_connection_t *conn)
                 //vflow_set_uint64(conn->common.vflow, VFLOW_ATTRIBUTE_WINDOW_CLOSURES, conn->window.closed_count);
                 qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG, DLV_FMT " TCP RX window CLOSED: inbound_bytes=%" PRIu64 " unacked=%" PRIu64,
                        DLV_ARGS(conn->inbound_delivery), conn->inbound_octets, unacked);
+                qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO, "[C%"PRIu64"] Mick: window closed =%"PRIu64,
+                       conn->conn_id, conn->window.closed_count);
             }
             if (conn->listener_side) {
                 vflow_set_uint64(conn->common.vflow, VFLOW_ATTRIBUTE_OCTETS, conn->inbound_octets);
@@ -1616,6 +1624,8 @@ static bool manage_tls_flow_XSIDE_IO(qd_tcp_connection_t *conn)
             qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG, DLV_FMT " TCP RX window CLOSED: inbound_bytes=%" PRIu64 " unacked=%" PRIu64,
                    DLV_ARGS(conn->inbound_delivery), conn->inbound_octets,
                    (conn->inbound_octets - conn->window.last_update));
+            qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO, "[C%"PRIu64"] Mick: window closed =%"PRIu64,
+                   conn->conn_id, conn->window.closed_count);
         }
 
         //
@@ -2281,6 +2291,12 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                     close_raw_connection(conn, "delivery-failed", "destination unreachable");
                     // clean stuff up when DISCONNECT event arrives
                 }
+                if (window_full(conn)) {
+                    conn->window.opened_count += 1;
+                    conn->window.disabled = true;
+                    qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO, "[C%"PRIu64"] Mick: window opened (conn closed) =%"PRIu64,
+                           conn->conn_id, conn->window.opened_count);
+                }
             } else {
                 //
                 // handle flow control window updates
@@ -2314,11 +2330,15 @@ static void CORE_delivery_update(void *context, qdr_delivery_t *dlv, uint64_t di
                 // occurs the remote will no longer send PN_RECEIVED updates necessary to open the window.
                 conn->window.disabled = conn->window.disabled || settled || final_outcome;
                 if (window_was_full && !window_full(conn)) {
+                    conn->window.opened_count += 1;
                     qd_log(LOG_TCP_ADAPTOR, QD_LOG_DEBUG,
                            DLV_FMT " TCP RX window %s: inbound_bytes=%" PRIu64 " unacked=%" PRIu64,
                            DLV_ARGS(dlv),
                            conn->window.disabled ? "DISABLED" : "OPENED",
                            conn->inbound_octets, (conn->inbound_octets - conn->window.last_update));
+                    qd_log(LOG_TCP_ADAPTOR, QD_LOG_INFO, "[C%"PRIu64"] Mick: window opened =%"PRIu64,
+                           conn->conn_id, conn->window.opened_count);
+
                 }
             }
             need_wake = !window_full(conn);

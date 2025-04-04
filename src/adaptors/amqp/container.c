@@ -90,6 +90,12 @@ struct qd_session_t {
 
     // Has this session been counted by policy? Only remotely initiated sessions can be counted by policy
     bool policy_counted;
+
+    // Mick stuff
+    bool is_blocked;
+    uint64_t conn_id;
+    uint64_t blocked_count;
+    uint64_t unblocked_count;
 };
 
 
@@ -924,6 +930,26 @@ void qd_link_q3_unblock(qd_link_t *link)
     }
 }
 
+void qd_session_mark_blocked(qd_session_t *ssn)
+{
+    if (!ssn->is_blocked) {
+        ssn->is_blocked = true;
+        ssn->blocked_count += 1;
+
+        qd_log(LOG_CONTAINER, QD_LOG_INFO, "[C%"PRIu64"] Mick: session blocked=%"PRIu64,
+               ssn->conn_id, ssn->blocked_count);
+    }
+}
+
+void qd_session_mark_unblocked(qd_session_t *ssn)
+{
+    if (ssn->is_blocked) {
+        ssn->is_blocked = false;
+        ssn->unblocked_count += 1;
+        qd_log(LOG_CONTAINER, QD_LOG_INFO, "[C%"PRIu64"] Mick: session unblocked=%"PRIu64,
+               ssn->conn_id, ssn->unblocked_count);
+    }
+}
 
 uint64_t qd_link_link_id(const qd_link_t *link)
 {
@@ -957,6 +983,12 @@ qd_session_t *qd_session(pn_session_t *pn_ssn)
         // These thresholds come from the old Q3 session byte limits
         qd_ssn->outgoing_bytes_high_threshold = 1048576;
         qd_ssn->outgoing_bytes_low_threshold  =  524288;
+
+        if (pn_conn) {
+            qd_connection_t *qd_conn = pn_connection_get_context(pn_conn);
+            if (qd_conn)
+                qd_ssn->conn_id = qd_conn->connection_id;
+        }
     }
     return qd_ssn;
 }
@@ -977,6 +1009,14 @@ void qd_session_decref(qd_session_t *qd_ssn)
         uint32_t rc = sys_atomic_dec(&qd_ssn->ref_count);
         assert(rc != 0); // underflow
         if (rc == 1) {
+
+            if (qd_ssn->blocked_count || qd_ssn->unblocked_count) {
+                qd_log(LOG_CONTAINER, QD_LOG_INFO, "[C%"PRIu64"] Mick: session blocked=%"PRIu64" unblocked=%"PRIu64"%s",
+                       qd_ssn->conn_id,
+                       qd_ssn->blocked_count, qd_ssn->unblocked_count,
+                       qd_ssn->blocked_count > qd_ssn->unblocked_count ? "!!!" : "");
+            }
+
             qd_link_t *link = DEQ_HEAD(qd_ssn->q3_blocked_links);
             while (link) {
                 qd_link_q3_unblock(link);  // removes link from list

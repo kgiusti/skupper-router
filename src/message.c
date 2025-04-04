@@ -2021,6 +2021,9 @@ static void qd_message_send_cut_through(qd_message_pvt_t *msg, qd_message_conten
         notify_consumed = false;  // no need to restart producer - it is done
     }
 
+    if (*session_stalled)
+        qd_session_mark_blocked(qd_link_get_session(link));
+
     if (notify_consumed) {
         activate_message_producer((qd_message_t *) msg);
     }
@@ -2224,6 +2227,9 @@ ssize_t qd_message_send(qd_message_t *in_msg,
     } else {
         *session_stalled = session_limit == 0;
     }
+
+    if (*session_stalled)
+        qd_session_mark_blocked(qd_link_get_session(link));
 
     return bytes_sent;
 }
